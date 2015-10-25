@@ -1265,69 +1265,29 @@ _loop
 		lda screenROWLUTHi,x
 		eor # (>kVectors.charBase) ^ $D8
 		sta screenPointer+1
-;		lda screenPointer
-;		sec
-;		sbc #40
-;		sta pointer1
-;		lda screenPointer+1
-;		sbc #0
-;		sta pointer1+1
-;		lda screenPointer
-;		clc
-;		adc #40
-;		sta pointer2
-;		lda screenPointer+1
-;		adc #0
-;		sta pointer2+1
-		
+		lda (mapType),y
+		cmp # kSpriteLevelDataTypesStart
+		bcs _skip
+		tax
 		lda (mapXEnd),y
 		sta ZPTemp2
 		lda (mapXStart),y
 		sta ZPTemp3
 		lda CRAMBorderPlotColour
-		bne _clear
-		lda (mapType),y
-		cmp # kSpriteLevelDataTypesStart
-		bcs _skip
-		tax
+		bne _clear		
 		lda charColourTBL,x
-		sta CRAMPlotColour
 _clear
+		sta CRAMPlotColour
 		tya
 		pha
-;		cpx #0
-;		bne _notTopRow2
-;		lda pointer2   ; make top row same as bottom row
-;		sta pointer1
-;		lda pointer2+1
-;		sta pointer1+1
-;		jmp _plot
-;_notTopRow2
-;		cpx #23
-;		bne _plot
-;		lda pointer1   ; make top row same as bottom row
-;		sta pointer2
-;		lda pointer1+1
-;		sta pointer2+1
 _plot	ldy ZPTemp3 ; do leading cap
-;		beq _loop2
-;		dey
-;		lda CRAMBorderPlotColour 
-;		sta (screenPointer),y		
-;		iny
-_loop2	lda CRAMBorderPlotColour		
-;		sta (pointer1),y		; top row
-;		sta (pointer2),y		; bottom row
-		lda CRAMPlotColour		; middle row
+_loop2	lda CRAMPlotColour		; middle row
 		sta (screenPointer),y		
 		iny		
 		cpy ZPTemp2
 		bcc _loop2
 		beq _loop2
-;		cpy #31
-;		beq _skipEnd
-;		lda CRAMBorderPlotColour ; end row
-;		sta (screenPointer),y		
+	
 _skipEnd
 		pla
 		tay
