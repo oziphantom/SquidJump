@@ -105,6 +105,13 @@ kEntSpriteBuffer .block
 	entColPtr = mplex.sprc + startOffset
 	entPtrPtr = mplex.sprp + startOffset 
 .bend
+kCharDefines .block
+	coral = 19
+	ice = 128+64+20
+	check = 128+64+21
+	leftConvayer = 22
+	rightConvayer = 128+64+23	
+.bend	
 
 * = $c6
 pointer1	.word ? ;	= $c6 ;7
@@ -404,7 +411,19 @@ start
 		jsr initMapTracker
 		jsr plotCRAMForCurrentScreen
 		jsr setStatusScreenSprites
+		jsr plotStatusChars
 		jsr buildConvayerChars
+		; set up ECBM colours
+		lda #0
+		sta $d021
+		lda #6
+		sta $d022
+		lda #3
+		sta $d023
+		lda #1
+		sta $d024
+		
+		
 		lda #9
 		sta HiScore.Digit6
 		lda #8
@@ -557,7 +576,7 @@ _addY
 		sec
 		sbc #8
 		sta yScroll
-		ora #%0010000
+		ora #%01010000
 		sta $d011
 ;		inc $d020
 		
@@ -594,7 +613,7 @@ _noYMove
 				
 WriteD011
 		lda yScroll
-		ora #%0010000
+		ora #%01010000
 		sta $d011
 		jmp PostLoop		
 				
@@ -620,7 +639,7 @@ Fall
 		clc
 		adc #8
 		sta yScroll
-		ora #%0010000
+		ora #%01010000
 		sta $d011
 		
 ;		inc $d020
@@ -635,32 +654,47 @@ Fall
 ;
 ; end loop
 ;
-		
+checkCharsInternal		
+	lda (checkSpriteToCharData.screenLoc),y
+	cmp # kCharDefines.coral
+	beq CCong
+	cmp # kCharDefines.ice
+	beq CConIce
+	cmp # kCharDefines.leftConvayer
+	beq CConLeftCon
+	cmp # kCharDefines.rightConvayer
+	beq CConRightCon	
+	rts		
+			
 checkCollision
 	lda checkSpriteToCharData.yDeltaCheck
-	bmi _exit	
+	bmi CCexit	
 	lda mplex.ypos
 	cmp #222
-	bcc _checkChars
-_ong
+	bcc CCcheckChars
+	pha
+	pha ; to fix up for the dropthrough
+CCong
+	pla
+	pla ; pull jsr to checkCharsInternal off the stack
 	jmp setPlayerOnGroundStatus
 	; implied rts from above
-_exit
+CCexit
 	jmp checkOtherEnts
-_onIce
+CConIce
 	lda #1
 	sta PlayerData.onIce
-	bne _ong
-_onLeftCon	
+	bne CCong
+CConLeftCon	
 	lda #1	
 	sta PlayerData.onConvayerLeft
-	bne _ong
-_onRightCon
+	bne CCong
+CConRightCon
 	lda #1
 	sta PlayerData.onConvayerRight
-	bne _ong
+	bne CCong
 	
-_checkChars
+CCcheckChars
 	lda mplex.yPos
 	lda mplex.yPos
 	sec
@@ -690,21 +724,9 @@ _checkChars
 	adc #0
 	sta checkSpriteToCharData.screenLoc+1
 	ldy #0
-	lda (checkSpriteToCharData.screenLoc),y
-	cmp #82
-	beq _ong
-	cmp #83
-	beq _onIce
-	cmp # kConvayerLeftChar
-	beq _onLeftCon
-	cmp # kConvayerRightChar
-	beq _onRightCon
+	jsr checkCharsInternal
 	ldy #1
-	lda (checkSpriteToCharData.screenLoc),y
-	cmp #82
-	beq _ong
-	cmp #83
-	beq _onIce
+	jsr checkCharsInternal
 	; fall through to checkMovingPlatforms
 	
 checkMovingPlatforms
@@ -1181,7 +1203,7 @@ setPlayerToSpawnPoint
 			
 emptyCRAM
 		ldx #00
-		lda #14
+		lda #6
 -		sta $d800,x
 		sta $d900,x
 		sta $da00,x
@@ -1190,9 +1212,34 @@ emptyCRAM
 		dex
 		bne -
 		rts
-
+		
+plotStatusChars
+		lda #< (kVectors.charBase + 40 - 9)
+		sta screenPointer
+		lda #> (kVectors.charBase + 40 - 9)
+		sta screenPointer+1		
+		ldx #24
+_loop2
+		lda #0
+		ldy #8
+_loop
+		sta (screenPointer),y
+		dey
+		bpl _loop
+		lda screenPointer
+		clc
+		adc #40
+		sta screenPointer
+		lda screenPointer+1
+		adc #0
+		sta screenPointer+1
+		dex
+		bpl _loop2
+		rts
+		
+		
 clearCRAMForCurrentScreen		
-		lda #14		
+		lda #6		
 		sta CRAMPlotColour		
 		sta CRAMBorderPlotColour	
 		bne plotCRAMinternal		
@@ -1218,69 +1265,29 @@ _loop
 		lda screenROWLUTHi,x
 		eor # (>kVectors.charBase) ^ $D8
 		sta screenPointer+1
-		lda screenPointer
-		sec
-		sbc #40
-		sta pointer1
-		lda screenPointer+1
-		sbc #0
-		sta pointer1+1
-		lda screenPointer
-		clc
-		adc #40
-		sta pointer2
-		lda screenPointer+1
-		adc #0
-		sta pointer2+1
-		
+		lda (mapType),y
+		cmp # kSpriteLevelDataTypesStart
+		bcs _skip
+		tax
 		lda (mapXEnd),y
 		sta ZPTemp2
 		lda (mapXStart),y
 		sta ZPTemp3
 		lda CRAMBorderPlotColour
-		bne _clear
-		lda (mapType),y
-		cmp # kSpriteLevelDataTypesStart
-		bcs _skip
-		tax
+		bne _clear		
 		lda charColourTBL,x
-		sta CRAMPlotColour
 _clear
+		sta CRAMPlotColour
 		tya
 		pha
-		cpx #0
-		bne _notTopRow2
-		lda pointer2   ; make top row same as bottom row
-		sta pointer1
-		lda pointer2+1
-		sta pointer1+1
-		jmp _plot
-_notTopRow2
-		cpx #23
-		bne _plot
-		lda pointer1   ; make top row same as bottom row
-		sta pointer2
-		lda pointer1+1
-		sta pointer2+1
 _plot	ldy ZPTemp3 ; do leading cap
-		beq _loop2
-		dey
-		lda CRAMBorderPlotColour 
-		sta (screenPointer),y		
-		iny
-_loop2	lda CRAMBorderPlotColour		
-		sta (pointer1),y		; top row
-		sta (pointer2),y		; bottom row
-		lda CRAMPlotColour		; middle row
+_loop2	lda CRAMPlotColour		; middle row
 		sta (screenPointer),y		
 		iny		
 		cpy ZPTemp2
 		bcc _loop2
 		beq _loop2
-		cpy #31
-		beq _skipEnd
-		lda CRAMBorderPlotColour ; end row
-		sta (screenPointer),y		
+	
 _skipEnd
 		pla
 		tay
@@ -2187,7 +2194,7 @@ loadMapVectors
 clearLargeMapArea
 		sei
 		ldx #0
-		lda #32
+		lda #65
 _loop	
 .for ptr = $6000, ptr < $c000, ptr = ptr + $100
 		sta ptr,x
@@ -2235,8 +2242,8 @@ _startPlot
 		lda (mapType),y
 		cmp # kSpriteLevelDataTypesStart
 		bcs _skipBottom ; not a solid or ice so skip it
-		clc
-		adc #82-1
+		tax 
+		lda TypeToCharLUT,x
 		sta pointer2
 
 		lda currMapPtr
@@ -2248,25 +2255,25 @@ _startPlot
 		sta pointer1+1
 		
 
-		lda #78 ; top line
+		lda #15 ; top line
 		jsr _doXLoop
 		
 		jsr addFortyToBothZPTemp
 		
 		ldy ZPTemp2
 		dey
-		lda #79 ; left line
+		lda #16 ; left line
 		sta (pointer1),y
 		lda pointer2
 		jsr _doXLoop
-		lda #80 ; top line
+		lda #17 ; top line
 		sta (pointer1),y
 		lda FirstLineToPlot
 		bne _skipBottom
 		
 		jsr addFortyToBothZPTemp
 		
-		lda #81 ; bottom line
+		lda #18 ; bottom line
 		jsr _doXLoop
 _skipBottom
 		lda #0
@@ -2298,7 +2305,8 @@ addFortyToBothZPTemp
 		adc #40
 		sta ZPTemp2
 		rts
-		
+TypeToCharLUT		
+		.byte 0,kCharDefines.coral,kCharDefines.ice,kCharDefines.check,kCharDefines.leftConvayer,kCharDefines.rightConvayer		
 updateTickdowns
 	ldx # size(TickDowns)-1
 _l	lda TickDowns,x
@@ -2432,7 +2440,8 @@ PlayerChargeColourTable
 PlayerChargeColourCount = * -playerChargeColourTable 
 
 PlayerDoubleJumpColourTable
-	.byte 14,14,3,3,14,14,0,0
+;	.byte 14,14,3,3,14,14,0,0
+	.byte 11,5,13,7,1,7,13,5,11
 PlayerDoubleJumpFlashCount = * -PlayerDoubleJumpColourTable
 
  				
@@ -2483,9 +2492,10 @@ _notReset
 _exit
 	rts
 	
-kConvayerLeftChar = 85	
-kConvayerRightChar = 86	
+kConvayerLeftChar = 22	
+kConvayerRightChar = 23	
 kConvayerRolledChars = 87
+kConvayerRolledCharsRight = kConvayerRolledChars+8
 
 buildConvayerChars
 	lda # <fileChars+(8*kConvayerRolledChars)
@@ -2515,6 +2525,35 @@ _copy
 	sta pointer1+1		
 	dex	
 	bpl _loop	
+	
+	lda # <fileChars+(8*kConvayerRolledCharsRight)
+	sta pointer1
+	lda # >fileChars+(8*kConvayerRolledCharsRight)
+	sta pointer1+1
+	ldx #7
+_loop2
+	ldy #7
+_copy2	
+	lda fileChars+(8*kConvayerRightChar),y	
+	sta (pointer1),y	
+	dey	
+	bpl _copy2	
+.for c = 0 , c < 8 , c = c + 1
+	lda fileChars+(8*kConvayerRightChar)+c
+	asl a
+	rol fileChars+(8*kConvayerRightChar)+c
++	
+.next		
+	lda pointer1		
+	clc		
+	adc #8		
+	sta pointer1		
+	lda pointer1+1		
+	adc #0		
+	sta pointer1+1		
+	dex	
+	bpl _loop2	
+	
 	rts	
 		
 rolConvayerLeft
@@ -2552,7 +2591,7 @@ rorConvayerRight
 	tax
 	ldy #7
 _loop
-	lda fileChars+(8*kConvayerRolledChars),x
+	lda fileChars+(8*kConvayerRolledCharsRight),x
 	sta fileChars+(8*kConvayerRightChar),y
 	dex
 	dey
@@ -2562,7 +2601,7 @@ _loop
 ; multiplexor
 setirq
 	sei			 ;set interrupt disable
-	lda #$10
+	lda #%01010000
 	sta $d011		 ;raster irq to 1st half of screen.
 	lda # kRaster.bottomRaster
 	sta $d012		 ;irq to happen at line #$fb
@@ -3053,7 +3092,8 @@ y .byte 50,71,71, 50+54,50+54, 50+92,50+92, 50+130, 50+168,50+168
 def .byte kSprBase+38,kSprBase+36,kSprBase+37, kSprBase+34,kSprBase+35, kSprBase+39,kSprBase+40, kSprBase+41, kSprBase+44,kSprBase+45 	
 .bend		
 
-charColourTBL .byte 10,10,1,1,12,12
+; first is a dummy 
+charColourTBL .byte 0,10,14,10,12,12,12
 
 *= $4000
 fileScreen .binary "map.raw"
