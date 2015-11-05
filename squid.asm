@@ -1,4 +1,5 @@
 WARN = 0
+NTSC = 0
 
 kVectors .block
 	charBase = $4000
@@ -65,7 +66,11 @@ kFont .block
 kSprBase = 64
 
 kRaster .block
+.if NTSC
+	bottomRaster = 200
+.else
 	bottomRaster = 241
+.endif
 .bend
 
 kDeadZone .block
@@ -779,6 +784,9 @@ _next
 	bpl _l
 	rts
 _foundOne
+	tay
+	lda (mapXEnd),y
+	bmi _next ; is map end 80+ then skip
 	lda OtherEnts.sprIndex,x
 	tay
 	lda kEntSpriteBuffer.entXPtr,y
@@ -1298,10 +1306,12 @@ _skip
 		adc #1
 		sta ZPTemp
 		tax
+		cpx #25
+		bcs _done
 		dey
-		cpy MapTrackingData.bottomIndex
-		bcc _done
-		bmi _done		
+;		cpy MapTrackingData.bottomIndex
+;		bcc _done
+		bmi _done ; catch the case if we try to go below 0		
 		jmp _loop ; probably can be bne
 _done	rts
 
@@ -1934,17 +1944,13 @@ copyBigMapToLittleMap
 		lda pointer2+1
 		adc #0
 		sta pointer3+1
-		
-		
-;		lda #$d8
-;		sta ZPTemp
-		;lda # >kVectors.charBase
-		;sta screenPointer+1
-		;lda #$00
-		;sta ZPTemp2
-		;sta screenPointer
-		;lda #4
-		;pha
+		lda pointer3
+		clc
+		adc #40
+		sta ZPTemp
+		lda pointer3+1
+		adc #00
+		sta ZPTemp3	
 		ldy #30
 _loop	lda (MapCopyTemp),y
 		sta kVectors.charBase+00,y
@@ -1954,14 +1960,13 @@ _loop	lda (MapCopyTemp),y
 		sta kVectors.charBase+80,y
 		lda (pointer3),y
 		sta kVectors.charBase+120,y
-	;	tax
-	;	lda fileCharCols,x
-	;	sta (ZPTemp2),y
+		lda (ZPtemp),y
+		sta kVectors.charBase+160,y
 		dey
 		bpl _loop
 		
 		lda MapCopyTemp
-		adc #160
+		adc #200
 		sta MapCopyTemp
 		lda MapCopyTemp+1
 		adc #0
@@ -1987,19 +1992,28 @@ _loop	lda (MapCopyTemp),y
 		lda pointer2+1
 		adc #0
 		sta pointer3+1
+		lda pointer3
+		clc
+		adc #40
+		sta ZPTemp
+		lda pointer3+1
+		adc #00
+		sta ZPTemp3	
 		ldy #30
 _loop2	lda (MapCopyTemp),y
-		sta kVectors.charBase+160,y
-		lda (pointer1),y
 		sta kVectors.charBase+200,y
-		lda (pointer2),y
+		lda (pointer1),y
 		sta kVectors.charBase+240,y
-		lda (pointer3),y
+		lda (pointer2),y
 		sta kVectors.charBase+280,y
+		lda (pointer3),y
+		sta kVectors.charBase+320,y
+		lda (ZPTemp),y
+		sta kVectors.charBase+360,y
 		dey
 		bpl _loop2		
 		lda MapCopyTemp
-		adc #160
+		adc #200
 		sta MapCopyTemp
 		lda MapCopyTemp+1
 		adc #0
@@ -2024,20 +2038,29 @@ _loop2	lda (MapCopyTemp),y
 		lda pointer2+1
 		adc #0
 		sta pointer3+1
+		lda pointer3
+		clc
+		adc #40
+		sta ZPTemp
+		lda pointer3+1
+		adc #00
+		sta ZPTemp3	
 		ldy #30
 _loop3	lda (MapCopyTemp),y
-		sta kVectors.charBase+320,y
-		lda (pointer1),y
-		sta kVectors.charBase+360,y
-		lda (pointer2),y
 		sta kVectors.charBase+400,y
-		lda (pointer3),y
+		lda (pointer1),y
 		sta kVectors.charBase+440,y
+		lda (pointer2),y
+		sta kVectors.charBase+480,y
+		lda (pointer3),y
+		sta kVectors.charBase+520,y
+		lda (ZPTemp),y
+		sta kVectors.charBase+560,y
 		dey
 		bpl _loop3
 		
 		lda MapCopyTemp
-		adc #160
+		adc #200
 		sta MapCopyTemp
 		lda MapCopyTemp+1
 		adc #0
@@ -2063,20 +2086,29 @@ _loop3	lda (MapCopyTemp),y
 		lda pointer2+1
 		adc #0
 		sta pointer3+1
+		lda pointer3
+		clc
+		adc #40
+		sta ZPTemp
+		lda pointer3+1
+		adc #00
+		sta ZPTemp3	
 		ldy #30
 _loop4	lda (MapCopyTemp),y
-		sta kVectors.charBase+480,y
-		lda (pointer1),y
-		sta kVectors.charBase+520,y
-		lda (pointer2),y
-		sta kVectors.charBase+560,y
-		lda (pointer3),y
 		sta kVectors.charBase+600,y
+		lda (pointer1),y
+		sta kVectors.charBase+640,y
+		lda (pointer2),y
+		sta kVectors.charBase+680,y
+		lda (pointer3),y
+		sta kVectors.charBase+720,y
+		lda (ZPTemp),y
+		sta kVectors.charBase+760,y
 		dey
 		bpl _loop4
 		
 		lda MapCopyTemp
-		adc #160
+		adc #200
 		sta MapCopyTemp
 		lda MapCopyTemp+1
 		adc #0
@@ -2102,47 +2134,15 @@ _loop4	lda (MapCopyTemp),y
 		lda pointer2+1
 		adc #0
 		sta pointer3+1
+		lda pointer3
+		clc
+		adc #40
+		sta ZPTemp
+		lda pointer3+1
+		adc #00
+		sta ZPTemp3	
 		ldy #30
 _loop5	lda (MapCopyTemp),y
-		sta kVectors.charBase+640,y
-		lda (pointer1),y
-		sta kVectors.charBase+680,y
-		lda (pointer2),y
-		sta kVectors.charBase+720,y
-		lda (pointer3),y
-		sta kVectors.charBase+760,y
-		dey
-		bpl _loop5
-		
-		lda MapCopyTemp
-		adc #160
-		sta MapCopyTemp
-		lda MapCopyTemp+1
-		adc #0
-		sta MapCopyTemp+1
-		lda MapCopyTemp
-		clc
-		adc #40
-		sta pointer1
-		lda MapCopyTemp+1
-		adc #0
-		sta pointer1+1
-		lda pointer1
-		clc
-		adc #40
-		sta pointer2
-		lda pointer1+1
-		adc #0
-		sta pointer2+1
-		lda pointer2
-		clc
-		adc #40
-		sta pointer3
-		lda pointer2+1
-		adc #0
-		sta pointer3+1
-		ldy #30
-_loop6	lda (MapCopyTemp),y
 		sta kVectors.charBase+800,y
 		lda (pointer1),y
 		sta kVectors.charBase+840,y
@@ -2150,22 +2150,10 @@ _loop6	lda (MapCopyTemp),y
 		sta kVectors.charBase+880,y
 		lda (pointer3),y
 		sta kVectors.charBase+920,y
+		lda (ZPTemp),y
+		sta kVectors.charBase+960,y
 		dey
-		bpl _loop6
-	;	tax
-	;	lda fileCharCols,x
-	;	sta (ZPTemp2),y
-		;dey
-		;beq _loop
-		;pla
-		;sec
-		;sbc #1
-		;beq _exit
-		;pha
-		;inc screenPointer+1
-		;inc MapCopyTemp+1
-	;	inc ZPTemp
-		;jmp _loop
+		bpl _loop5	
 _exit	rts
 
 loadMapVectors
