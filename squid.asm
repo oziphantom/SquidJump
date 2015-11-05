@@ -996,6 +996,16 @@ _justUpdate
 noChargePump
 		lda # kPlayerParams.normalColour
 		sta mplex.sprc
+		lda #1+kSprBase
+		sta mplex.sprp+1
+		lda #0+kSprBase
+		sta mplex.sprp
+		lda #0
+		sta PlayerData.jumpChargePump
+		sta PlayerData.jumpChargePump + 1
+		lda #8
+		sta PlayerData.spriteFlashChargePump
+		
 endChargePump
 		
 _updateJump		
@@ -2448,7 +2458,7 @@ updatePlayerFlash
 _skip
 	sta TickDowns.playerFlash
 	
-	ldx PlayerData.spriteFlashIndex
+	ldx PlayerData.spriteFlashIndex 
 	lda PlayerChargeColourTable,x
 	sta mplex.sprc
 	inx
@@ -2458,7 +2468,20 @@ _skip
 _notrest	
 	stx PlayerData.spriteFlashIndex
 _exit	
+	ldx PlayerData.spriteFlashChargePump
+	bpl _skip2
+	ldx #0
+_skip2
+	lda PlayerAnimFrameOutlines,x
+	sta mplex.sprp+1
+	lda PlayerAnimFrameBackground,x
+	sta mplex.sprp
 	rts
+	
+PlayerAnimFrameOutlines
+	.byte kSprBase+13,kSprBase+11,kSprBase+9,kSprBase+7,kSprBase+5,kSprBase+3,kSprBase+1,kSprBase+1,kSprBase+1,kSprBase+1,kSprBase+1
+PlayerAnimFrameBackground
+	.byte kSprBase+12,kSprBase+10,kSprBase+8,kSprBase+6,kSprBase+4,kSprBase+2,kSprBase+0,kSprBase+0,kSprBase+0,kSprBase+0,kSprBase+0
 	
 updatePlayerDoubleJumpFlash
 	lda PlayerData.deltaToAddToJumped
