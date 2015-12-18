@@ -1,5 +1,12 @@
 WARN = 0
 NTSC = 0
+DISABLE_PLAYER = 1
+
+.if NTSC = 1
+	NUM_FRAMES = 60
+.else
+	NUM_FRAMES = 50
+.endif
 
 kVectors .block
 	charBase = $4000
@@ -12,6 +19,8 @@ kVectors .block
 	spr6ID = charBase+1022
 	spr7ID = charBase+1023	
 	mapBottom = $c000-40	
+	timerPreShiftsBase = $f000
+	timerZeroCache = timerPreShiftsBase + ( 15 * NUM_FRAMES )
 .bend
 
 kTileXCount = 16
@@ -25,6 +34,7 @@ kBounds .block
 .bend
 
 kTimers .block
+	waterUpdate = 8
 .bend
 
 kPlayerParams .block
@@ -53,9 +63,15 @@ kScoreSprites .block
 	hiScoreDigit1 = 64+hiScoreDigit4
 .bend
 
+kTimerSprites .block 
+	firstSpriteBase = ( kSprBase + 44 ) * 64 + 3 + $4000
+	secondSpriteBase = firstSpriteBase + 64
+.bend
+
 kEntSprits .block
 	bounceBase = kSprBase + 24
 	doubleJumpBase = kSprBase + 20
+	endOfLevel = kSprBase + 14
 .bend
 
 kFont .block
@@ -116,6 +132,8 @@ kCharDefines .block
 	check = 128+64+21
 	leftConvayer = 22
 	rightConvayer = 128+64+23	
+	waterChar1 = 14 + 128
+	waterChar2 = 24 + 128
 .bend	
 
 * = $c6
@@ -134,9 +152,14 @@ mapType			.word ? ;= $db
 currMapPtr		.word ? ;= $dd
 numItemsMap		.byte ? ;= $df
 mapItemIndex	.byte ? ;= $f0
+bottomMapPtr	.word ? ;= $f2-2
 
-* = $f1
+* = $f3
 checkSpriteToCharData .dstruct sCSTCCParams 
+
+.if * >= $100
+.warn "ZP Page Overflow"
+.endif
 
 sGameData .struct 
 lives .byte ?
@@ -154,6 +177,7 @@ sTimerTickDowns .struct
 playerAnim 	.byte ?
 playerFlash .byte ?
 playerDoubleJumpFlash .byte ?
+water .byte?
 .ends
 
 sPlayerData .struct
@@ -204,6 +228,7 @@ digit2 .byte ?
 digit1 .byte ?
 .ends
 
+kNumMovingPlatforms = 3
 sMovingPlatform .struct
 y	.byte ?,?,?
 sprIndex .byte ?,?,?
@@ -212,6 +237,7 @@ direction .byte ?,?,?
 mapTableY .byte ?,?,?
 width	.byte ?,?,?
 .ends
+kNumOtherEnts = 3
 sOtherEnts .struct
 y .byte ?,?,?
 sprIndex .byte ?,?,?
@@ -335,6 +361,28 @@ NumJumpless2 .byte ?
 DoChargePump .byte ?	
 FallingOrOnGround .byte ?	
 DoJump	.byte ?	
+YSave .byte ?
+NeedToChangeLevel .byte ?
+Level .byte ?
+ByteBuffer .byte ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+TimerSprite2SrcPtr .byte ?,?
+TimerFramesCount .byte ?
+TimerSecondsCount .byte ?
+TimerTenSecondsCount .byte ?
+TimerMinuetsCount .byte ?
+currentWaterLevelPtr .word ?
+currentWaterCharIndex .byte ?
+WaterStartSeconds .byte ?
+WaterStartTenSeconds .byte ?
+WaterStartMinutes .byte ?
+WaterDoWater .byte ?
+DoResetLevel .byte ?
+CurrStatusRasterSpriteIndex .byte ? ; the sprite data index
+CurrStatusRasterIndex .byte ? ; the raster index
+
+.if * > $0400
+.warn  "variables over $400"
+.endif
 
 *= $0801 ; 00 0C 08 0A 00 9E 20 32 30 36 34 00 00
 	.word (+), 2005 ;pointer, line number
@@ -399,8 +447,6 @@ start
 		bne -
 		jsr emptyCRAM
 		;jsr plotTileMap
-		jsr resetPlayerData 
-		jsr setPlayerToSpawnPoint
 		lda #0
 		sta mplex.lsbtod
 		lda #5
@@ -408,16 +454,13 @@ start
 		lda #1
 		sta ConvayerLeftDelta
 		sta ConvayerRightDelta
-		jsr loadMapVectors
-		jsr clearLargeMapArea
-		jsr convertMapDataToLargeMap
-		jsr resetCurrMapPtrToFirstScreen
-		jsr copyBigMapToLittleMap
-		jsr initMapTracker
-		jsr plotCRAMForCurrentScreen
+		sta NeedToChangeLevel
+		
 		jsr setStatusScreenSprites
 		jsr plotStatusChars
 		jsr buildConvayerChars
+		jsr buildTimerFractions
+		jsr cacheZeroTimerSprite
 		; set up ECBM colours
 		lda #0
 		sta $d021
@@ -446,6 +489,7 @@ start
 		lda #0
 		sta $300
 		sta $301
+		sta $302
 ;		
 ;		cli
 ;		-		lda $300	
@@ -499,10 +543,40 @@ _skipDebug
 		lda #0
 		sta $0301
 _skipDebug2
+		lda $0302
+		beq _skipDebug3
+		jsr DEBUG_UPDATEWATER
+		lda #0
+		sta $0302
+_skipDebug3
 		lda #0
 		sta mplex.lsbtod
+		lda NeedToChangeLevel
+		beq skipNewLevel
+		jsr ResetLevel
+		jmp MainLoop
+skipNewLevel		
 		jsr updateTickdowns
+		lda PlayerData.dead
+		beq _notDead
+		lda # kSprBase+47
+		sta mplex.sprp+1
+		lda # kSprBase+48
+		sta mplex.sprp
+		lda DoResetLevel
+		beq +
+		lda #0
+		sta DoResetLevel
+		jsr ResetLevel
++		jmp MainLoop
+_notDead		
+.if DISABLE_PLAYER = 0
 		jsr joyToPlayerDelta
+.else
+		lda #0
+		sta checkSpriteToCharData.xDeltaCheck
+		sta checkSpriteToCharData.yDeltaCheck
+.endif		
 		jsr checkCollision
 		lda checkSpriteToCharData.xDeltaCheck
 		beq _addY
@@ -585,8 +659,12 @@ _addY
 		sta $d011
 ;		inc $d020
 		
+		lda #0
+		sta pointer3 ; don't offset the water check
 		jsr clearCRAMForCurrentScreen		
 		jsr moveMapTrackeUpOneRow
+		lda #0
+		sta pointer3 ; don't offset the water check
 		jsr plotCRAMForCurrentScreen
 		jsr moveCurrMapPtrUpOneRow
 		jsr copyBigMapToLittleMap
@@ -594,15 +672,17 @@ _addY
 ;		dec $d020
 _noScroll
 		cmp # kDeadZone.bottom
-		bcc PostLoop
+		bcc _updateWater
 		lda currMapPtr+1
-		cmp # >(kVectors.mapBottom-(40*23))
+		cmp # >(kVectors.mapBottom-(40*24))
 		bcc Fall ; if we are above fall
-		bne PostLoop ; if we are not equal thus greater then check the lo
+		bne _updateWater ; if we are not equal thus greater then check the lo
 		lda currMapPtr
-		cmp # <(kVectors.mapBottom-(40*23))
+		cmp # <(kVectors.mapBottom-(40*24))
 		bcc Fall ; above that lo as well fall
-
+		
+_updateWater
+		jsr updateWater		
 PostLoop
 		jsr updatePlayerDoubleJumpFlash
 		jsr updateMovingPlatform
@@ -610,6 +690,7 @@ PostLoop
 		jsr rolConvayerLeft
 		jsr rorConvayerRight
 		dec $d020
+		jsr copyAndAdvanceSecondTimerSprite
 		lda ScrollDelta
 		beq _noYMove
 		jsr updateEntsY
@@ -621,6 +702,7 @@ WriteD011
 		ora #%01010000
 		sta $d011
 		jmp PostLoop		
+		jsr updateWater		
 				
 Fall
 		lda # kDeadZone.bottom
@@ -648,8 +730,12 @@ Fall
 		sta $d011
 		
 ;		inc $d020
+		lda #40
+		sta pointer3 
 		jsr clearCRAMForCurrentScreen
 		jsr moveMapTrackeDownOneRow
+		lda #80
+		sta pointer3
 		jsr plotCRAMForCurrentScreen
 		jsr moveCurrMapPtrDownOneRow
 		jsr copyBigMapToLittleMap
@@ -669,8 +755,46 @@ checkCharsInternal
 	beq CConLeftCon
 	cmp # kCharDefines.rightConvayer
 	beq CConRightCon	
+	cmp # kCharDefines.waterChar1
+	beq DEATH
 	rts		
-			
+		
+DEATH			
+	lda #1			
+	sta PlayerData.dead			
+	jsr setNMI	
+	pla			
+	pla			
+	rts			
+											
+ResetLevelNMI											
+;	lda $DD0D										
+	inc DoResetLevel										
+	rti										
+												
+ResetLevel
+		sei
+		lda $DD0D ; ack any NMI
+		jsr clearLargeMapArea ;trahes x so needs to happen before loadvectors
+		ldx Level
+		jsr loadMapVectors
+		jsr convertMapDataToLargeMap
+		jsr resetCurrMapPtrToFirstScreen
+		jsr copyBigMapToLittleMap
+		jsr emptyCRAM
+		jsr initMapTracker
+		jsr plotCRAMForCurrentScreen
+		jsr resetPlayerData 
+		jsr setPlayerToSpawnPoint
+		jsr resetESBPointer
+		jsr removeMovingPlatAndOtherEnts
+		lda #0
+		sta NeedToChangeLevel
+		sta yScroll
+		sta ScrollDelta
+		cli		
+		rts		
+				
 checkCollision
 	lda checkSpriteToCharData.yDeltaCheck
 	bmi CCexit	
@@ -704,6 +828,7 @@ CCcheckChars
 	lda mplex.yPos
 	sec
 	sbc #34
+	sbc yScroll
 	sta ZPTemp
 	and #7
 	cmp #4
@@ -739,7 +864,7 @@ checkMovingPlatforms
 	clc
 	adc #11
 	sta ZPTemp
-	ldx #2
+	ldx # kNumMovingPlatforms
 _l	lda MovingPlatform.numSprites,x
 	bne _foundOne
 _next	
@@ -776,7 +901,7 @@ _foundOne
 	jmp checkOtherEnts ; could be fall thorugh eventually
 	
 checkOtherEnts
-	ldx #2
+	ldx # kNumOtherEnts
 _l	lda OtherEnts.mapTableY,x
 	bne _foundOne
 _next	
@@ -856,7 +981,7 @@ _goodY
 	lda EntFuncTable,y
 	pha
 	rts ; call function above
-EntFuncTable .rta CollFuncBouce,CollFuncDoubleJump 
+EntFuncTable .rta CollFuncBouce,CollFuncDoubleJump,AdvanceLevel 
  	
 CollFuncBouce	
 	lda #0
@@ -872,6 +997,11 @@ CollFuncBouce
 CollFuncDoubleJump
 	lda #1
 	sta PlayerData.deltaToAddToJumped
+	rts
+AdvanceLevel
+	lda #1 
+	sta NeedToChangeLevel
+	inc Level
 	rts
 		
 platformWidthTable	
@@ -1197,16 +1327,52 @@ setPlayerAnimeTo
 updatePlayerAnim
 		rts 
 		
+removeMovingPlatAndOtherEnts
+	ldx # kNumMovingPlatforms-1
+	lda #0
+-	sta MovingPlatform.numSprites,x
+	dex
+	bpl -
+	ldx # kNumOtherEnts
+-	sta OtherEnts.mapTableY,x
+	dex
+	bpl -
+	rts
+
 resetPlayerData
+	ldx # size(sPlayerData) -1
+	lda #0
+-	sta PlayerData,x
+	dex
+	bpl -
 	lda #$FF
 	sta PlayerData.onMovingPlatform
 	lda #2
 	sta PlayerData.deltaToAddToJumped
+	jsr restoreZeroTimerSprite
+	lda # <kVectors.timerPreShiftsBase
+	sta TimerSprite2SrcPtr
+	lda # >kVectors.timerPreShiftsBase
+	sta TimerSprite2SrcPtr+1
+	lda # <kVectors.mapBottom
+	sta currentWaterLevelPtr
+	lda # >kVectors.mapBottom
+	sta currentWaterLevelPtr+1
+	lda #5
+	sta WaterStartSeconds
+	lda #2
+	sta WaterStartTenSeconds
+	lda #1
+	sta WaterStartMinutes
 	lda #0
-	sta PlayerData.dead
-	sta PlayerData.onIce
-	sta PlayerData.onGround
-	sta PlayerData.hasJumped
+	sta TimerFramesCount	
+	sta TimerSecondsCount
+	sta TimerTenSecondsCount
+	sta TimerMinuetsCount
+	sta yScroll
+	sta ScrollDelta
+	sta TickDowns.water
+	sta WaterDoWater
 	rts
 		
 setPlayerToSpawnPoint
@@ -1270,19 +1436,40 @@ plotCRAMForCurrentScreen
 		
 plotCRAMinternal
 		ldy MapTrackingData.topIndex
-		iny 
-		lda (mapYDelta),y
-		sec
-		sbc MapTrackingData.topCharsToNext
-		sta ZPTemp
-		tax
-		dey
+		ldx MapTrackingData.topCharsToNext
+		stx ZPTemp
+	;	lda (mapYDelta),y
+	;	sec
+	;	sbc MapTrackingData.topCharsToNext
+	;	sta ZPTemp
+	;	tax
+		dey ; as the top index is the one above
 _loop
+		sty ZPTemp2
+		lda CRAMBorderPlotColour
+		bne _clear2	
+		dex
 		lda screenROWLUTLo,x
 		sta screenPointer
 		lda screenROWLUTHi,x
+		; eor # (>kVectors.charBase) ^ $D8
+		sta screenPointer+1
+		ldy pointer3  
+		lda (screenPointer),y
+		cmp # kCharDefines.waterChar1  ; have we reached a water row
+		beq _done					 ; stop plotting CRAM then
+		cmp # kCharDefines.waterChar2
+		beq _done 
+		inx
+_clear2
+		lda screenROWLUTLo,x
+		sta screenPointer
+		lda screenROWLUTHi,x
+		sta screenPointer+1		
+		lda screenPointer+1
 		eor # (>kVectors.charBase) ^ $D8
 		sta screenPointer+1
+		ldy ZPTemp2
 		lda (mapType),y
 		cmp # kSpriteLevelDataTypesStart
 		bcs _skip
@@ -1313,7 +1500,7 @@ _skip
 		lda (mapYDelta),y
 		clc
 		adc ZPTemp
-		adc #1
+		adc #1 
 		sta ZPTemp
 		tax
 		cpx #25
@@ -1355,10 +1542,14 @@ plotTileMap
 .ENDC		
 		
 resetCurrMapPtrToFirstScreen
-		lda # <(kVectors.mapBottom-(40*23))
+		lda # <(kVectors.mapBottom-(40*24))
 		sta currMapPtr
-		lda # >(kVectors.mapBottom-(40*23))
+		lda # >(kVectors.mapBottom-(40*24))
 		sta currMapPtr+1
+		lda # <kVectors.mapBottom
+		sta bottomMapPtr
+		lda # >kVectors.mapBottom
+		sta bottomMapPtr+1
 		rts
 		
 initMapTracker
@@ -1366,10 +1557,11 @@ initMapTracker
 		sty MapTrackingData.bottomCharsToNext
 		sty MapTrackingData.bottomIndex
 		sty ZPTemp
-		clc
 _findTop
 		lda (mapYDelta),y
+		clc
 		adc ZPTemp
+		adc #1 ; for the fact the each number is 0 based
 		sta ZPTemp
 		cmp #24
 		beq _deadOn
@@ -1381,18 +1573,18 @@ _goneOver
 		sec		
 		sbc (mapYDelta),y	
 		sta ZPTemp	
-		lda #25	
+		lda #26	
 		sec	
 		sbc ZPTemp	
-		dey
-		;dey
+
 _exit
 		sta MapTrackingData.topCharsToNext	
 		sty MapTrackingData.topIndex	
 		rts	
 _deadOn							
-		lda #0						
-		sta _exit						
+		iny				
+		lda #1										
+		bne _exit						
 								
 moveCurrMapPtrUpOneRow
 		sec
@@ -1402,95 +1594,117 @@ moveCurrMapPtrUpOneRow
 		lda currMapPtr+1
 		sbc #0
 		sta currMapPtr+1
+		sec
+		lda bottomMapPtr
+		sbc #40
+		sta bottomMapPtr
+		lda bottomMapPtr+1
+		sbc #0
+		sta bottomMapPtr+1
 		rts
-
+		
+moveCurrMapPtrDownOneRow
+		clc
+		lda currMapPtr
+		adc #40
+		sta currMapPtr
+		lda currMapPtr+1
+		adc #0
+		sta currMapPtr+1
+		clc
+		lda bottomMapPtr
+		adc #40
+		sta bottomMapPtr
+		lda bottomMapPtr+1
+		adc #0
+		sta bottomMapPtr+1
+		rts
+		
 moveMapTrackeUpOneRow
+		ldy MapTrackingData.topIndex
+		lda MapTrackingData.topCharsToNext
+		clc
+		adc #1
+		sta MapTrackingData.topCharsToNext
+		cmp (mapYDelta),y
+		beq _notExpired
+		bcc _notExpired ; <= 
+		lda (mapType),y
+		cmp # kSpriteLevelDataTypesStart
+		bcc _notSpecial
+		;cary must be set so ghost sec here
+		jsr addMovingPlatformTop ; preserves Y	
+_notSpecial
+		iny
+		sty MapTrackingData.topIndex 
+		lda #0
+		sta MapTrackingData.topCharsToNext
+_notExpired		
+		; bottom index		
+		ldy MapTrackingData.bottomIndex
+		lda MapTrackingData.bottomCharsToNext
+		clc
+		adc #1
+		sta MapTrackingData.bottomCharsToNext
+		cmp (mapYDelta),y
+		beq _notExpired2
+		bcc _notExpired2 ; <= 
+		lda (mapType),y
+		cmp # kSpriteLevelDataTypesStart
+		bcc _notSpecial2
+		;cary must be set so ghost sec here
+		jsr removeMovingPatform	
+_notSpecial2
+		lda #0
+		sta MapTrackingData.bottomCharsToNext		
+		inc MapTrackingData.bottomIndex	
+_notExpired2
+		rts	
+				
+moveMapTrackeDownOneRow
+		ldy MapTrackingData.topIndex
 		lda MapTrackingData.topCharsToNext
 		sec
 		sbc #1
 		sta MapTrackingData.topCharsToNext
 		bpl _notExpired
-		ldy MapTrackingData.topIndex		
-		iny
-		lda (mapType),y
-		cmp # kSpriteLevelDataTypesStart
-		bcc _notSpecial		
-		jsr addMovingPlatformTop		
-_notSpecial		
-		ldy MapTrackingData.topIndex		
-		iny
-		sty MapTrackingData.topIndex
-		iny
+		;ldy MapTrackingData.topIndex
+		
+		lda MapTrackingData.topIndex
+		sec
+		sbc #1
+		sta MapTrackingData.topIndex
+		tay
 		lda (mapYDelta),y
 		sta MapTrackingData.topCharsToNext
+		lda (mapType),y
+		cmp # kSpriteLevelDataTypesStart
+		bcc _notSpecial
+		clc ; remove from top ( also as per above it has to be set already)
+		jsr removeMovingPatform
+_notSpecial
 _notExpired
+		; check the bottom one
+		ldy MapTrackingData.bottomIndex
 		lda MapTrackingData.bottomCharsToNext
 		sec
 		sbc #1
 		sta MapTrackingData.bottomCharsToNext
 		bpl _notExpired2
-		ldy MapTrackingData.bottomIndex
+		dey
+		sty MapTrackingData.bottomIndex
 		lda (mapType),y
 		cmp # kSpriteLevelDataTypesStart
 		bcc _notSpecial2
-		sec ; remove from bottom
-		jsr removeMovingPatform
+		jsr addMovingPlatformBottom ; preserves Y
 _notSpecial2
-		iny
-		sty MapTrackingData.bottomIndex
-		;iny
 		lda (mapYDelta),y
 		sta MapTrackingData.bottomCharsToNext
-_notExpired2		
+_notExpired2
 		rts
-		
-moveMapTrackeDownOneRow
-		ldy MapTrackingData.topIndex
-		iny
-		lda (mapYDelta),y
-		cmp MapTrackingData.topCharsToNext
-		beq _expired
-		lda MapTrackingData.topCharsToNext
-		clc
-		adc #1
-		sta MapTrackingData.topCharsToNext
-		bne _notExpired ; just added one can't be FF right?
-_expired		
-		ldy MapTrackingData.topIndex
-		lda (mapType),y
-		cmp # kSpriteLevelDataTypesStart
-		bcc _notSpecial2		
-		clc ; remove from top	
-		jsr removeMovingPatform		
-_notSpecial2		
-		dec MapTrackingData.topIndex	
-		lda #0
-		sta MapTrackingData.topCharsToNext
-_notExpired
-		ldy MapTrackingData.bottomIndex
-		lda (mapYDelta),y
-		cmp MapTrackingData.bottomCharsToNext
-		beq _expired2
-		lda MapTrackingData.bottomCharsToNext
-		clc
-		adc #1
-		sta MapTrackingData.bottomCharsToNext
-		rts
-_expired2
-		dec MapTrackingData.bottomIndex
-		ldy MapTrackingData.bottomIndex
-		lda (mapType),y
-		cmp # kSpriteLevelDataTypesStart
-		bcc _notSpecial		
-		jsr addMovingPlatformBottom		
-_notSpecial		
-		lda #0
-		sta MapTrackingData.bottomCharsToNext
-_notExpired2		
-		rts
-		
 
 ABI_foundOne
+		sty YSave
 		lda ZPTemp2
 		sta OtherEnts.type,x
 		jsr calcSpriteXFromMapStart
@@ -1550,6 +1764,7 @@ _blankIt2
 		lda # kEmptySprite
 _storeIT2	
 		sta kEntSpriteBuffer.entPtrPtr,x
+		ldy YSave
 		rts
 addBounceInteral		
 		ldx #0
@@ -1579,9 +1794,9 @@ addBounceBottom
 		bne addBounceInteral
 	
 MapTypeToSprite
-.byte kEntSprits.bounceBase,kEntSprits.doubleJumpBase
+.byte kEntSprits.bounceBase,kEntSprits.doubleJumpBase,kEntSprits.endOfLevel
 MapTypeToSpriteColours
-.byte 2,3
+.byte 2,3,7
 
 calcSpriteXFromMapStart
 		lda (mapXStart),y
@@ -1916,15 +2131,7 @@ _noOver
 	rts
 	
 		
-moveCurrMapPtrDownOneRow
-		clc
-		lda currMapPtr
-		adc #40
-		sta currMapPtr
-		lda currMapPtr+1
-		adc #0
-		sta currMapPtr+1
-		rts		
+
 				
 copyBigMapToLittleMap
 		lda currMapPtr
@@ -2167,21 +2374,21 @@ _loop5	lda (MapCopyTemp),y
 _exit	rts
 
 loadMapVectors
-		lda # <leveldatafile
+		lda ldfLUTLO,x
 		sta mapYDelta
-		lda # >leveldatafile
+		lda ldfLUTHI,x
 		sta mapYDelta+1
-		lda # <startX
+		lda sxLUTLO,x
 		sta mapXStart
-		lda # >startX
+		lda sxLUTHI,x
 		sta mapXStart+1
-		lda # <endX
+		lda exLUTLO,x
 		sta mapXEnd
-		lda # >endX
+		lda exLUTHI,x
 		sta mapXEnd+1
-		lda # <type
+		lda typeLUTLO,x
 		sta mapType
-		lda # >type
+		lda typeLUTHI,x
 		sta mapType+1
 		lda # <kVectors.mapBottom
 		sta currMapPtr
@@ -2206,7 +2413,7 @@ _exit
 		
 		
 convertMapDataToLargeMap
-		lda rowCounts
+		lda rowCounts,x
 		sta numItemsMap
 		ldy #0
 		sty mapItemIndex
@@ -2610,6 +2817,460 @@ _loop
 	rts
 
 ; multiplexor
+
+clearByteBuffer
+	ldx # size(ByteBuffer)-1
+	lda #0
+-	sta ByteBuffer,x
+	dex
+	bpl -
+	rts
+
+cleartimerPreShiftsBase
+	lda #0
+	tax
+-	sta kVectors.timerPreShiftsBase,x
+	sta kVectors.timerPreShiftsBase+$100,x
+	sta kVectors.timerPreShiftsBase+$200,x
+	inx
+	bne -
+	rts
+	
+;x should be char num * 8
+copyCharTOBuffer
+	ldy #0
+_copyLoop
+	lda kFont.digitsPointer,x	
+	sta ByteBuffer,y
+	inx
+	iny
+	iny
+	cpy #10
+	bcc _copyLoop
+	rts
+
+shiftBuffer5RowsRight16Bit
+	ldx #0
+_rowLoop
+	lsr ByteBuffer,x
+	ror ByteBuffer+1,x
+	inx 
+	inx
+	cpx #11
+	bcc _rowLoop
+	dey
+	bpl shiftBuffer5RowsRight16Bit	
+	rts
+	
+buildTimerFractions
+	jsr cleartimerPreShiftsBase
+	lda # <kVectors.timerPreShiftsBase
+	sta pointer1
+	lda # >kVectors.timerPreShiftsBase
+	sta pointer1+1
+	lda #0
+	sta NormalTemp1
+_loopMakeFirstDigit
+	jsr clearByteBuffer
+_loopShiftDigit	
+	ldx NormalTemp1	
+	jsr copyCharToBuffer
+	ldy #3 ; num times to shift
+	jsr shiftBuffer5RowsRight16Bit
+	lda ByteBuffer+2	
+	ora #%01100000 ; the :
+	sta ByteBuffer+2
+	lda ByteBuffer+6
+	ora #%01100000
+	sta ByteBuffer+6
+	lda #4
+	sta NormalTemp2
+_copyMultipleCopies	
+	ldx #0
+	ldy #0
+_repeatLoop
+	lda ByteBuffer,x
+	sta (pointer1),y
+	inx
+	iny
+	lda ByteBuffer,x
+	sta (pointer1),y
+	inx
+	iny
+	iny
+	cpx #11
+	bcc _repeatLoop
+	clc
+	lda pointer1
+	adc #15
+	sta pointer1
+	lda pointer1+1
+	adc #0
+	sta pointer1+1
+	dec NormalTemp2
+	bpl _copyMultipleCopies
+	lda NormalTemp1
+	clc
+	adc #8
+	cmp #10*8
+	beq _secondDigit
+	sta NormalTemp1
+	jmp _loopMakeFirstDigit
+_secondDigit
+	lda # <kVectors.timerPreShiftsBase + 1
+	sta pointer1
+	lda # >kVectors.timerPreShiftsBase
+	sta pointer1+1
+	lda #0
+	sta NormalTemp1
+_loopMakeSecondChar
+	jsr clearByteBuffer
+	ldx NormalTemp1	
+	jsr copyCharToBuffer
+	ldy #3 ; num times to shift
+	jsr shiftBuffer5RowsRight16Bit
+	lda #9
+	sta NormalTemp2
+_copyMultipleCopies2	
+	ldx #0
+	ldy #0
+_repeatLoop2
+	lda (pointer1),y
+	ora ByteBuffer,x
+	sta (pointer1),y
+	inx
+	iny
+	lda (pointer1),y
+	ora ByteBuffer,x
+	sta (pointer1),y
+	inx
+	iny
+	iny
+	cpx #11
+	bcc _repeatLoop2
+	clc
+	lda pointer1
+	adc #15*5
+	sta pointer1
+	lda pointer1+1
+	adc #0
+	sta pointer1+1
+	dec NormalTemp2
+	bpl _copyMultipleCopies2
+	lda NormalTemp1
+	clc
+	adc #16
+	cmp #20*8
+	beq _exit
+	sta NormalTemp1
+	sec
+	lda pointer1
+	sbc # < (15*(10*5))-15
+	sta pointer1
+	lda pointer1+1
+	sbc # > (15*(10*5))-15
+	sta pointer1+1
+	jmp _loopMakeSecondChar
+_exit
+	rts
+
+
+copyAndAdvanceSecondTimerSprite
+	lda TimerSprite2SrcPtr
+	sta pointer1
+	clc
+	adc #15
+	sta TimerSprite2SrcPtr
+	lda TimerSprite2SrcPtr+1
+	sta pointer1+1 
+	adc #0
+	sta TimerSprite2SrcPtr+1
+	lda TimerFramesCount
+	clc 
+	adc #1
+	cmp #50
+	bcc _skip
+	lda # <kVectors.timerPreShiftsBase
+	sta TimerSprite2SrcPtr
+	lda # >kVectors.timerPreShiftsBase
+	sta TimerSprite2SrcPtr+1
+	jsr incAndUpdateSecs
+	lda #0
+_skip
+	sta TimerFramesCount
+	ldy #14
+-	lda (pointer1),y	
+	sta kTimerSprites.secondSpriteBase,y
+	dey
+	bpl -
+	rts
+	
+cacheZeroTimerSprite
+	ldx #14
+-	lda kTimerSprites.firstSpriteBase,x
+	sta kVectors.timerZeroCache,x
+	lda kTimerSprites.secondSpriteBase,x
+	sta kVectors.timerZeroCache+15,x
+	dex
+	bpl -
+	rts
+	
+restoreZeroTimerSprite
+	ldx #14
+-	lda kVectors.timerZeroCache,x
+	sta kTimerSprites.firstSpriteBase,x
+	lda kVectors.timerZeroCache+15,x
+	sta kTimerSprites.secondSpriteBase,x
+	dex
+	bpl -
+	rts
+	
+kTimerMasks .block
+   Min    = %10000001
+   TensHi = %11100000
+   TensLo = %01111111
+   Secs   = %11000000
+.bend
+incAndUpdateSecs
+	dec $d020
+	lda TimerSecondsCount
+	clc
+	adc #1
+	sta TimerSecondsCount
+	cmp #10
+	bcc +
+	jsr incAndUpdateTens
+	ldx #0
+	stx TimerSecondsCount	
+	beq ++	
++	asl a
+	asl a
+	asl a ; x8
+	tax 
++	jsr copyCharTOBuffer
+	ldy #0 ; shift 1
+	jsr shiftBuffer5RowsRight16Bit
+	ldx #0
+	ldy #0
+-	lda kTimerSprites.firstSpriteBase+2,x
+	and # kTimerMasks.Secs
+	ora ByteBuffer,y
+	sta kTimerSprites.firstSpriteBase+2,x
+	inx
+	inx
+	inx
+	iny
+	iny
+	cpx #15
+	bcc -
+	inc $d020
+	rts
+	
+incAndUpdateTens	
+	lda TimerTenSecondsCount
+	clc
+	adc #1
+	sta TimerTenSecondsCount
+	cmp #6
+	bcc +
+	jsr incAndUpdateMins
+	ldx #0
+	stx TimerTenSecondsCount	
+	beq ++	
++	asl a
+	asl a
+	asl a ; x8
+	tax 
++	jsr copyCharTOBuffer
+	ldy #1 ; shift 2
+	jsr shiftBuffer5RowsRight16Bit
+	ldx #0
+	ldy #0
+-	lda kTimerSprites.firstSpriteBase+1,x
+	and # kTimerMasks.TensHi
+	ora ByteBuffer,y
+	sta kTimerSprites.firstSpriteBase+1,x
+	inx
+	iny
+	lda kTimerSprites.firstSpriteBase+1,x
+	and # kTimerMasks.TensLo
+	ora ByteBuffer,y
+	sta kTimerSprites.firstSpriteBase+1,x
+	inx
+	inx
+	iny
+	cpx #15
+	bcc -
+	rts
+
+incAndUpdateMins
+
+	lda TimerMinuetsCount
+	clc
+	adc #1
+	sta TimerMinuetsCount
+	cmp #10
+	bcc +
+	lda #9
+	sta TimerMinuetsCount		
++	asl a
+	asl a
+	asl a ; x8
+	tay 
+	ldx #0
+-	lda kTimerSprites.firstSpriteBase,x
+	and # kTimerMasks.Min
+	ora kFont.digitsPointer,y
+	sta kTimerSprites.firstSpriteBase,x
+	inx
+	inx
+	inx
+	iny
+	cpx #15
+	bcc -
+	rts	
+		
+updateWater
+	lda WaterDoWater
+	bne _doWater
+	ldx #0
+-	lda TimerSecondsCount,x
+	cmp WaterStartSeconds,x
+	bcc uwExit
+	inx
+	cpx #3
+	bne -
+	stx WaterDoWater
+_doWater
+	lda TickDowns.water
+	beq +
+uwExit	rts
++	
+	lda #kTimers.waterUpdate
+	sta TickDowns.water 
+DEBUG_UPDATEWATER
+	; copy next char to the spot
+	lda currentWaterCharIndex
+	sec
+	sbc #1
+	sta ZPTemp
+	bpl + ; 8 chars
+	lda #7
++	sta currentWaterCharIndex
+	asl a
+	asl a
+	asl a ; x8
+	tay
+	ldx #0
+-	lda fileChars+(6*8),y 
+	sta fileChars+(24*8),x
+	iny
+	inx
+	cpx #8
+	bcc -
+	lda ZPTemp
+	cmp #8
+	bcc uwExit 
+	; over flowed so shift the rows up
+	; is it above the bottom of the screen
+	lda currentWaterLevelPtr+1
+	cmp bottomMapPtr+1
+	beq +
+	bcs _below
+	bcc _doScreen
++	lda bottomMapPtr
+	cmp currentWaterLevelPtr
+	beq _doScreen
+	bcc _below
+_doScreen
+	sec
+	lda currentWaterLevelPtr
+	sbc currMapPtr
+	sta pointer2
+	lda currentWaterLevelPtr+1
+	sbc currMapPtr+1
+	sta pointer2+1
+	clc
+	lda pointer2+1
+	adc # >kVectors.charBase
+	sta pointer2+1
+	ldy #30
+	lda #14+128
+-	sta (pointer2),y
+	dey
+	bpl -
+	sec
+	lda pointer2
+	sbc #40
+	sta pointer2
+	sta pointer3
+	lda pointer2+1
+	sbc #00
+	sta pointer2+1
+	eor # (>kVectors.charBase) ^ $D8
+	sta pointer3+1
+	ldy #30
+-	lda #24+128
+	sta (pointer2),y
+	lda #6
+	sta (pointer3),y
+	dey
+	bpl -
+_below	
+	lda currentWaterLevelPtr
+	sta pointer1
+	lda currentWaterLevelPtr+1
+	sta pointer1+1
+	lda #14+128
+	ldy #30
+-	sta (pointer1),y
+	dey
+	bpl -
+	lda pointer1
+	sbc #40
+	sta pointer1
+	lda pointer1+1
+	sbc #00
+	sta pointer1+1
+	lda #24+128
+	ldy #30
+-	sta (pointer1),y
+	dey
+	bpl -
+	lda currentWaterLevelPtr
+	sec
+	sbc #40
+	sta currentWaterLevelPtr
+	lda currentWaterLevelPtr+1
+	sbc #00
+	sta currentWaterLevelPtr+1
+	rts
+	
+setNMI	
+	lda #$FF	
+	sta $DD04	
+	lda #$0F	
+	sta $DD06	
+	lda #$FF	
+	sta $DD05		
+	lda #0
+	sta $DD07
+	lda # <ResetLevelNMI
+	sta $FFFA
+	lda # >ResetLevelNMI
+	sta $FFFB
+	lda #$82	; make it fire an NMI on Timer B underflow
+	sta $DD0D	
+	lda $DD0D   ; ack any NMI
+;	lda $DD0E	
+;	and #%11000110
+;	ora #%00011001 ; keep 50/60, make system 02, don't force load,one shot, start	
+	lda #$91
+	sta $DD0E	
+	lda #%01011001
+	sta $DD0F	
+	rts
+	
 setirq
 	sei			 ;set interrupt disable
 	lda #%01010000
@@ -2623,6 +3284,9 @@ setirq
 	lda #$1f
 	sta $dc0d		 ;turn off all types of cia irq/nmi.
 	sta $dd0d
+	lda $dc0e
+	and #$fe
+	sta $dc0e
 	lda #$01
 	sta $d01a		 ;turn on raster irq.
 	lda #$35
@@ -3094,13 +3758,88 @@ eirq	pla
 		pla
 justRTI	rti
 
+updateStatusSpriteRaster
+		pha			;save registers
+		txa
+		pha
+		tya
+		pha
+		inc $d019		;acknowledge irq
+		lda CurrStatusRasterSpriteIndex
+		tax
+		tay
+		lda	statusSpritesDefs.numSprToDo,x
+		sta ZPTemp
+		tax
+-		lda statusSpritesDefs.def,y
+		sta kVectors.spr5ID,x
+		; do colour look  up here
+		txa
+		asl a
+		tax
+		lda statusSpritesDefs.x,y
+		sta $D00A,x
+		lda statusSpritesDefs.y,y
+		sta $D00B,x
+		inc CurrStatusRasterSpriteIndex
+		ldx CurrStatusRasterSpriteIndex
+		dec ZPTemp
+		lda ZPTemp
+		bpl -
+		inc CurrStatusRasterIndex
+		ldx CurrStatusRasterIndex
+		cpx #3
+		beq _done
+		lda statusSpritesDefs.rasterPos,x	
+		sta $D012	
+_eirq	pla
+		tay
+		pla
+		tax
+		pla
+		rti
+_done	lda kRaster.bottomRaster
+		sta $D012
+		lda # <BottomRaster
+		sta $fffe
+		lda # >BottomRaster
+		sta $ffff
+		jmp _eirq
+		
+BottomRaster
+		pha			;save registers
+		txa
+		pha
+		tya
+		pha
+		inc $d019		;acknowledge irq
+		lda #3
+		sta CurrStatusRasterSpriteIndex
+		lda #1
+		sta CurrStatusRasterIndex
+		lda statusSpritesDefs.x
+		sta $D00A
+		lda statusSpritesDefs.x+1
+		sta $D00C
+		lda statusSpritesDefs.x+2
+		sta $D00E
+		lda statusSpritesDefs.y
+		sta $D00B
+		lda statusSpritesDefs.y+1
+		sta $D00D
+		lda statusSpritesDefs.y+2
+		sta $D00F
+		
+		
 statusSpritesDefs .block		
 	kNum = 10
 	kColour = 1
 	;   | high score          |  score      |    stage    | Lives | timer
 x .byte 200+24+8,200+24,200+48,200+24,200+48,200+24,200+48,200+36 , 200+27, 200+51
 y .byte 50,71,71, 50+54,50+54, 50+92,50+92, 50+130, 50+168,50+168
-def .byte kSprBase+38,kSprBase+36,kSprBase+37, kSprBase+34,kSprBase+35, kSprBase+39,kSprBase+40, kSprBase+41, kSprBase+44,kSprBase+45 	
+def .byte kSprBase+38,kSprBase+36,kSprBase+37, kSprBase+34,kSprBase+35, kSprBase+39,kSprBase+40, kSprBase+41, kSprBase+44,kSprBase+45 
+numSprToDo .byte 2,1,2,1 ;-1 of value		
+rasterPos .byte 100,138,210
 .bend		
 
 ; first is a dummy 
