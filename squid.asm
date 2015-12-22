@@ -1,6 +1,7 @@
 WARN = 0
 NTSC = 0
-DISABLE_PLAYER = 1
+DISABLE_PLAYER = 0
+DISABLE_RASTER_DEBUG = 1
 
 .if NTSC = 1
 	NUM_FRAMES = 60
@@ -40,8 +41,11 @@ kTimers .block
 kPlayerParams .block
 	jumpStartDelta = 255-1
 	jumpDeltaAccum = 19
-	jumpDeltaAccumFloat = 9
-	maxFallSpeed = 2
+	jumpDeltaAccumFloat = 10
+	maxFallSpeed = 4
+	maxRiseSpeed = $fb
+	maxRiseSpeedLo = $C0
+	chargeRate = 50
 	normalColour = 15
 .bend
 
@@ -72,6 +76,7 @@ kEntSprits .block
 	bounceBase = kSprBase + 24
 	doubleJumpBase = kSprBase + 20
 	endOfLevel = kSprBase + 14
+	movingPlatformLeft = kSprBase + 30
 .bend
 
 kFont .block
@@ -83,7 +88,7 @@ kSprBase = 64
 
 kRaster .block
 .if NTSC
-	bottomRaster = 200
+	bottomRaster = 238
 .else
 	bottomRaster = 241
 .endif
@@ -98,8 +103,25 @@ kSpriteLevelDataTypesStart  = 6
 kSpriteAutoBounceID = 8
 kEmptySprite = kSprBase+49
 
+sMultiDataSet .struct 
+y 		.byte ?,?,?,?
+x1		.byte ?,?,?,?
+x2		.byte ?,?,?,?
+x3		.byte ?,?,?,?
+col1	.byte ?,?,?,?
+col2	.byte ?,?,?,?
+col3	.byte ?,?,?,?
+multi	.byte ?,?,?,?
+ptr1	.byte ?,?,?,?
+ptr2	.byte ?,?,?,?
+ptr3	.byte ?,?,?,?
+enable 	.byte ?,?,?,?
+.ends
+
+.comment
 mplex .block
 kMaxSpr = $1f
+
 sort = $02
 ybuf = $22		;sprite y position raster buffer
 xbuf = $42		;sprite x position raster buffer
@@ -109,23 +131,19 @@ pbuf = $a2		;sprite pointer raster buffer
 sptr = $c2		;sprite pointer for raster
 cnt  = $c3
 mnt  = $c4
-lsbtod = $c5
-ypos = $c000	;sprite y position frame buffer
-xpos = $c020	;sprite x position frame buffer
-xmsb = $c040	;sprite x msb frame buffer
-sprc = $c060	;sprite color frame buffer
-sprp = $c080	;sprite pointer frame buffer
+
+;ypos = $c000	;sprite y position frame buffer
+;xpos = $c020	;sprite x position frame buffer
+;xmsb = $c040	;sprite x msb frame buffer
+;sprc = $c060	;sprite color frame buffer
+;sprp = $c080	;sprite pointer frame buffer
+.bend
+.endc
+kEntSpriteBuffer .block
+	startOffset = 0
+	endOffset = 4
 .bend
 
-kEntSpriteBuffer .block
-	startOffset = statusSpritesDefs.kNum+2
-	endOffset = statusSpritesDefs.kNum+1+16
-	entYPtr = mplex.ypos+startOffset
-	entXPtr = mplex.xpos+startOffset
-	entXMSBPtr = mplex.xmsb + startOffset
-	entColPtr = mplex.sprc + startOffset
-	entPtrPtr = mplex.sprp + startOffset 
-.bend
 kCharDefines .block
 	coral = 19
 	ice = 128+64+20
@@ -136,25 +154,52 @@ kCharDefines .block
 	waterChar2 = 24 + 128
 .bend	
 
-* = $c6
-pointer1	.word ? ;	= $c6 ;7
-pointer2	.word ?	;= $c8 ;9
-pointer3	.word ?	;= $ca ;b
-screenPointer	.word ? ;= $cc ;d
-mapCopyTemp		.word ? ;= $ce ;f
-ZPTemp2			.byte ?;= $d2
-ZPTemp			.byte ?;= $d3
-ZPTemp3			.byte ?;= $d4
-mapYDelta		.word ? ;= $d5
-mapXStart		.word ? ;= $d7
-mapXEnd			.word ? ;= $d9
-mapType			.word ? ;= $db
-currMapPtr		.word ? ;= $dd
-numItemsMap		.byte ? ;= $df
-mapItemIndex	.byte ? ;= $f0
-bottomMapPtr	.word ? ;= $f2-2
+kNextRasterType .block
+	status = 1
+	ent = 2
+	both = 3
+.bend
 
-* = $f3
+* = $02
+numRasters .byte ?
+rasterSplitYPosEnt .byte ?,?,?,?
+rasterSpriteSet .dstruct sMultiDataSet 
+entitySpriteSet .dstruct sMultiDataSet 
+lsbtod .byte ?
+rasterEntityPointerCache .byte ?
+rasterTemp1 .byte ?
+rasterTemp2 .byte ?
+rasterTemp3 .byte ?
+rasterTemp4 .byte ?
+currEntRasterIndex .byte ?
+nextRasterType .byte ? 
+playerX .byte ?
+playerY .byte ?
+playerPtrMulti .byte ?
+playerPtrMono .byte ?
+playerColourMulti .byte ?
+playerColourMono .byte ?
+status3rdSprCol1 .byte ?
+status3rdSprCol2 .byte ?
+status3rdSprCol3 .byte ?
+status3rdSprCol4 .byte ?
+
+pointer1	.word ? 	
+pointer2	.word ?	
+pointer3	.word ?	
+screenPointer	.word ? 
+mapCopyTemp		.word ? 
+ZPTemp2			.byte ?
+ZPTemp			.byte ?
+ZPTemp3			.byte ?
+mapYDelta		.word ?
+mapXStart		.word ?
+mapXEnd			.word ?
+mapType			.word ?
+currMapPtr		.word ?
+numItemsMap		.byte ?
+mapItemIndex	.byte ?
+bottomMapPtr	.word ?
 checkSpriteToCharData .dstruct sCSTCCParams 
 
 .if * >= $100
@@ -388,7 +433,7 @@ CurrStatusRasterIndex .byte ? ; the raster index
 	.word (+), 2005 ;pointer, line number
 	.null $9e, ^start;will be sys 4096
 +	.word 0	 ;basic line end
-	
+		
 *= $0810
 start
 		jsr setirq ; clear all interupts and put out own in
@@ -416,22 +461,18 @@ start
 		lda #1
 		sta $d026
 		lda #kSprBase
-		sta mplex.sprp
+		sta playerPtrMulti
 		lda #kSprBase+1
-		sta mplex.sprp+1
+		sta playerPtrMono
 		lda #1
 		sta $d015
 		lda #255
 		sta $d01c
-		lda #15
-		sta mplex.sprc
-		sta mPlex.xmsb+1
-		lda #0
-		sta mplex.sprc+1
-		sta mPlex.xmsb
+		jsr setPlayerToDefaultColours
 		;lda #%00010000
 		;sta $d011
 		; clear Mplex 
+.comment
 		ldx #$00	  ;init x with 00
 -		txa			  ;transfer x to a to create index vals
 		sta mplex.sort,x	;store it in the sort table
@@ -440,6 +481,7 @@ start
 		inx			  
 		cpx # mPlex.kMaxSpr+1	 ;have we reached 32 yet?
 		bne -
+.endc
 		ldx #0
 		lda #0
 -		sta variables,x		; clear all the variables
@@ -448,7 +490,7 @@ start
 		jsr emptyCRAM
 		;jsr plotTileMap
 		lda #0
-		sta mplex.lsbtod
+		sta lsbtod
 		lda #5
 		sta GameData.lives
 		lda #1
@@ -456,7 +498,7 @@ start
 		sta ConvayerRightDelta
 		sta NeedToChangeLevel
 		
-		jsr setStatusScreenSprites
+	;	jsr setStatusScreenSprites
 		jsr plotStatusChars
 		jsr buildConvayerChars
 		jsr buildTimerFractions
@@ -527,19 +569,19 @@ start
 ;		main loop
 ;
 MainLoop
--		lda mplex.lsbtod	
+-		lda lsbtod	
 		beq -	
 		lda $300
 		beq _skipDebug
 		lda #159
-		sta mplex.ypos
+		sta playerY
 		lda #0
 		sta $300
 _skipDebug
 		lda $0301
 		beq _skipDebug2
 		lda #181
-		sta mPlex.yPos
+		sta playerY
 		lda #0
 		sta $0301
 _skipDebug2
@@ -550,7 +592,7 @@ _skipDebug2
 		sta $0302
 _skipDebug3
 		lda #0
-		sta mplex.lsbtod
+		sta lsbtod
 		lda NeedToChangeLevel
 		beq skipNewLevel
 		jsr ResetLevel
@@ -560,9 +602,10 @@ skipNewLevel
 		lda PlayerData.dead
 		beq _notDead
 		lda # kSprBase+47
-		sta mplex.sprp+1
+		sta playerPtrMulti
 		lda # kSprBase+48
-		sta mplex.sprp
+		sta playerPtrMono
+		jsr setPlayerToDefaultColours
 		lda DoResetLevel
 		beq +
 		lda #0
@@ -580,14 +623,14 @@ _notDead
 		jsr checkCollision
 		lda checkSpriteToCharData.xDeltaCheck
 		beq _addY
-		lda mplex.xpos
+		lda playerX
 		clc
 		adc checkSpriteToCharData.xDeltaCheck
 		sta ZPTemp
 		; xdelta +ve if this is +ve but original was -ve we have gone over
 		lda checkSpriteToCharData.xDeltaCheck
 		bmi _subbedX
-		lda mplex.xpos
+		lda playerX
 		bpl _loadX 
 		; so last pos in negative >80
 		lda ZPTemp
@@ -598,7 +641,7 @@ _notDead
 		jmp _storeX
 _subbedX
 		; xdelta -ve if this is -ve but original was +ve we have gone over
-		lda mplex.xpos
+		lda playerX
 		bmi _loadX
 		; last post is positive >80
 		lda ZPTemp
@@ -621,18 +664,16 @@ _storeX
 ;		bcc _storeX2	
 ;		lda #8		
 _storeX2
-		sta mplex.xpos
-		sta mplex.xpos+1
+		sta playerX
 _addY		
-+		lda mplex.ypos
++		lda playerY
 		clc
 		adc checkSpriteToCharData.yDeltaCheck
-		sta mplex.ypos
-		sta mplex.ypos+1
+		sta playerY
 		jsr updatePlayerAnim
 		lda #0
 		sta ScrollDelta
-		lda mplex.ypos
+		lda playerY
 		cmp # kDeadZone.top
 		bcs _noScroll
 		
@@ -642,14 +683,13 @@ _addY
 		
 		lda # kDeadZone.top
 		sec
-		sbc mplex.ypos
+		sbc playerY
 		sta ScrollDelta
 		clc
 		adc yScroll
 		sta yScroll
 		ldx # kDeadZone.top+1
-		stx mPlex.yPos
-		stx mPlex.yPos+1
+		stx playerY
 		cmp #8
 		bcc WriteD011
 		sec
@@ -686,10 +726,14 @@ _updateWater
 PostLoop
 		jsr updatePlayerDoubleJumpFlash
 		jsr updateMovingPlatform
+.if DISABLE_RASTER_DEBUG = 0
 		inc $d020
+.endif
 		jsr rolConvayerLeft
 		jsr rorConvayerRight
+.if DISABLE_RASTER_DEBUG = 0
 		dec $d020
+.endif
 		jsr copyAndAdvanceSecondTimerSprite
 		lda ScrollDelta
 		beq _noYMove
@@ -707,10 +751,10 @@ WriteD011
 Fall
 		lda # kDeadZone.bottom
 		sec
-		sbc mplex.ypos
+		sbc playerY
 		sta ScrollDelta
 		
-		lda mplex.ypos
+		lda playerY
 		sec
 		sbc # kDeadZone.bottom
 		sta ZPTemp
@@ -719,8 +763,7 @@ Fall
 		sbc ZPTemp
 		sta yScroll
 		ldx # kDeadZone.bottom-1
-		stx mPlex.yPos
-		stx mPlex.yPos+1
+		stx playerY
 		cmp #0
 		bpl WriteD011
 		clc
@@ -786,6 +829,8 @@ ResetLevel
 		jsr plotCRAMForCurrentScreen
 		jsr resetPlayerData 
 		jsr setPlayerToSpawnPoint
+		lda entitySpriteBufferHead
+		sta entitySpriteBufferTail
 		jsr resetESBPointer
 		jsr removeMovingPlatAndOtherEnts
 		lda #0
@@ -798,7 +843,7 @@ ResetLevel
 checkCollision
 	lda checkSpriteToCharData.yDeltaCheck
 	bmi CCexit	
-	lda mplex.ypos
+	lda playerY
 	cmp #222
 	bcc CCcheckChars
 	pha
@@ -824,8 +869,7 @@ CConRightCon
 	bne CCong
 	
 CCcheckChars
-	lda mplex.yPos
-	lda mplex.yPos
+	lda playerY
 	sec
 	sbc #34
 	sbc yScroll
@@ -839,7 +883,7 @@ CCcheckChars
 	lsr 
 	sta checkSpriteToCharData.yCharCollide
 	tax
-	lda mplex.xPos
+	lda playerX
 	sec
 	sbc #16
 	lsr 
@@ -860,7 +904,7 @@ CCcheckChars
 	; fall through to checkMovingPlatforms
 	
 checkMovingPlatforms
-	lda mplex.yPos
+	lda playerY
 	clc
 	adc #11
 	sta ZPTemp
@@ -879,7 +923,7 @@ _exit
 _foundOne
 	lda MovingPlatform.sprIndex,x
 	tay
-	lda kEntSpriteBuffer.entYPtr,y
+	lda entitySpriteSet.y,y
 	sec
 	sbc ZPTemp 
 	bmi _next ; they are above me
@@ -888,9 +932,9 @@ _foundOne
 	; now we check the X
 	lda MovingPlatform.width,x
 	sta NormalTemp1
-	lda mplex.xpos
+	lda playerX
 	sec
-	sbc kEntSpriteBuffer.entXPtr,y
+	sbc entitySpriteSet.x1,y
 	adc #10 ; player left X collide
 	bmi _next
 	ldy NormalTemp1
@@ -914,16 +958,16 @@ _foundOne
 	bmi _next ; is map end 80+ then skip
 	lda OtherEnts.sprIndex,x
 	tay
-	lda kEntSpriteBuffer.entXPtr,y
+	lda entitySpriteSet.x1,y
 	clc
 	adc #8
 	sta NormalTemp1
-	lda kEntSpriteBuffer.entYPtr,y
+	lda entitySpriteSet.y,y
 	clc
 	adc #8
 	sta NormalTemp2
 	
-	lda mplex.xpos
+	lda playerX
 	clc
 	adc #8
 	sec
@@ -940,7 +984,7 @@ _skipEORX
 	cmp #16
 	bcs _next ; not in range
 _goodX	
-	lda mPlex.yPos
+	lda playerY
 	clc
 	adc #8
 	sec
@@ -966,11 +1010,8 @@ _goodY
 	sta entitySpriteBufferPointer
 	tay
 	lda # kEmptySprite
-	sta kEntSpriteBuffer.entPtrPtr,y
-	jsr advanceESBPointer
-	ldy entitySpriteBufferPointer
-	lda # kEmptySprite
-	sta kEntSpriteBuffer.entPtrPtr,y	
+	sta entitySpriteSet.ptr1,y
+	sta entitySpriteSet.ptr2,y
 	lda OtherEnts.type,x
 	sec
 	sbc # kSpriteAutoBounceID
@@ -1111,12 +1152,26 @@ skipJumpSetup
 		beq noChargePump
 		lda PlayerData.jumpChargePump
 		sec
-		sbc #10
+		sbc # kPlayerParams.chargeRate
 		sta PlayerData.jumpChargePump
 		lda PlayerData.jumpChargePump+1
 		sbc #0
 		sta PlayerData.jumpChargePump+1
-		lda PlayerData.fireWasDown
+		cmp # kPlayerParams.maxRiseSpeed
+		beq _checkLo
+		bcs +
+		lda # kPlayerParams.maxRiseSpeed
+		sta PlayerData.jumpChargePump+1
+		lda # kPlayerParams.maxRiseSpeedLo
+		sta PlayerData.jumpChargePump
+		jmp +
+_checkLo		
+		lda PlayerData.jumpChargePump
+		cmp # kPlayerParams.maxRiseSpeedLo
+		bcs +
+		lda # kPlayerParams.maxRiseSpeedLo
+		sta PlayerData.jumpChargePump
++		lda PlayerData.fireWasDown
 		bne _justUpdate
 		lda #8
 		sta PlayerData.spriteFlashChargePump
@@ -1125,11 +1180,11 @@ _justUpdate
 		jmp endChargePump		
 noChargePump
 		lda # kPlayerParams.normalColour
-		sta mplex.sprc
+		sta playerColourMulti
 		lda #1+kSprBase
-		sta mplex.sprp+1
+		sta playerPtrMono
 		lda #0+kSprBase
-		sta mplex.sprp
+		sta playerPtrMulti
 		lda #0
 		sta PlayerData.jumpChargePump
 		sta PlayerData.jumpChargePump + 1
@@ -1345,6 +1400,7 @@ resetPlayerData
 -	sta PlayerData,x
 	dex
 	bpl -
+	jsr setPlayerToDefaultColours
 	lda #$FF
 	sta PlayerData.onMovingPlatform
 	lda #2
@@ -1377,14 +1433,18 @@ resetPlayerData
 		
 setPlayerToSpawnPoint
 	lda #128+24
-	sta mplex.xpos
-	sta mplex.xpos+1
-	sta mplex.xmsb+1
+	sta playerX
 	lda #222
-	sta mplex.ypos
-	sta mplex.ypos+1
+	sta playerY
 	rts
-			
+	
+setPlayerToDefaultColours
+	lda #15
+	sta playerColourMulti
+	lda #0
+	sta playerColourMono
+	rts			
+					
 emptyCRAM
 		ldx #00
 		lda #6
@@ -1730,13 +1790,18 @@ _tail	lda #2 ; number of sprite to alloc
 _allocd		
 		ldy ZPTemp2
 		lda ZPTemp3
-		sta kEntSpriteBuffer.entYPtr,x
+		sta entitySpriteSet.y,x
 		lda NormalTemp3
-		sta kEntSpriteBuffer.entXPtr,x
+		sta entitySpriteSet.x1,x
+		sta entitySpriteSet.x2,x
 		lda MapTypeToSpriteColours - kSpriteLevelDataTypesStart - 2,y
-		sta kEntSpriteBuffer.entColPtr,x
+		sta entitySpriteSet.col2,x
 		lda #0
-		sta kEntSpriteBuffer.entXMSBPtr,x
+		sta entitySpriteSet.col1,x
+		lda #%00001100
+		sta entitySpriteSet.enable,x
+		lda #%00001000
+		sta entitySpriteSet.multi,x
 		lda NormalTemp1
 		bmi _blankIt
 		lda MapTypeToSprite - kSpriteLevelDataTypesStart - 2,y
@@ -1744,26 +1809,10 @@ _allocd
 _blankIt
 		lda # kEmptySprite
 _storeIT
-		sta kEntSpriteBuffer.entPtrPtr,x
-		jsr advanceESBPointer
-		ldx entitySpriteBufferPointer
-		lda ZPTemp3
-		sta kEntSpriteBuffer.entYPtr,x
-		lda NormalTemp3
-		sta kEntSpriteBuffer.entXPtr,x
-		sta kEntSpriteBuffer.entXMSBPtr,x
-		lda #0
-		sta kEntSpriteBuffer.entColPtr,x		
-		lda NormalTemp1
-		bmi _blankIt2
-		lda MapTypeToSprite - kSpriteLevelDataTypesStart - 2,y
+		sta entitySpriteSet.ptr2,x
 		clc
 		adc #1
-		bne _storeIT2
-_blankIt2
-		lda # kEmptySprite
-_storeIT2	
-		sta kEntSpriteBuffer.entPtrPtr,x
+		sta entitySpriteSet.ptr1,x
 		ldy YSave
 		rts
 addBounceInteral		
@@ -1843,11 +1892,10 @@ _foundOne
 		sbc (mapXStart),y
 		sta MovingPlatform.width,x	; X width of platform
 		sbc #1 						;make 0 based
-		sta NormalTemp1
 		sta NormalTemp5
 		jsr calcSpriteXFromMapStart
 		stx NormalTemp2				; moving plaform number
-		ldx NormalTemp1				; X width of platform 
+		ldx NormalTemp5				; X width of platform 
 		lda PlatformSizeToSpritesCountLUT,x	
 		ldx NormalTemp2				; moving plaform number
 		sta MovingPlatform.numSprites,x
@@ -1857,7 +1905,6 @@ _foundOne
 		lda entitySpriteBufferHead
 		sta entitySpriteBufferPointer ; cache the current head
 		sta MovingPlatform.sprIndex,x ; write the sprite index to use
-		lda NormalTemp1	
 		jsr allocAInESBHead				; make room for it
 		jmp _allocd
 _tail	jsr allocAInESBTail
@@ -1867,39 +1914,41 @@ _tail	jsr allocAInESBTail
 _allocd		
 		tya							; save the end number
 		sta MovingPlatform.mapTableY,x				
-		lda NormalTemp5				; number of sprites
+		lda NormalTemp5				; width
 		asl a
 		asl a ; times by 4
 		sta NormalTemp4		
-		ldy #0	
-_setSpritesLoop			
+
 		lda ZPTemp3					; y to appear at
 		ldx entitySpriteBufferPointer	; sprite number
-		sta kEntSpriteBuffer.entYPtr,x	; store Y
+		sta entitySpriteSet.y,x			; store Y
 		lda NormalTemp3					; get start X
-		sta kEntSpriteBuffer.entXPtr,x	; store X
-		lda #1
-		sta kEntSpriteBuffer.entXMSBPtr,x ; Mono Sprite
-		lda # kSprBase+30
-		sta kEntSpriteBuffer.entPtrPtr,x  ; bugs
-		lda #1
-		sta kEntSpriteBuffer.entColPtr,x ; white
-		inc NormalTemp4					; next sprite delta offset	
-		ldx NormalTemp4
-		lda MovingPlatformXDeltaTable,x
-		clc 
-		adc NormalTemp3
-		sta NormalTemp3
-		jsr advanceESBPointer 	; next sprite
+		sta entitySpriteSet.x1,x	; store X
+		ldy NormalTemp4
+		clc
+		adc MovingPlatformXDeltaTable-3,y
+		sta entitySpriteSet.x2,x
 		iny
-		cpy NormalTemp1			; number of sprites
-		bne _setSpritesLoop
-		
+		clc
+		adc MovingPlatformXDeltaTable-3,y
+		sta entitySpriteSet.x3,x
+		lda #0
+		sta entitySpriteSet.multi,x ; All Mono Sprites
+		lda # kEntSprits.movingPlatformLeft
+		sta entitySpriteSet.ptr1,x
+		sta entitySpriteSet.ptr2,x
+		sta entitySpriteSet.ptr3,x
+		lda #1
+		sta entitySpriteSet.col1,x; white
+		sta entitySpriteSet.col2,x; white
+		sta entitySpriteSet.col3,x; white
+		ldy NormalTemp1 ; number of sprites
+		lda EntEnableMaskLUT,y
+		sta entitySpriteSet.enable,x	
 		ldy ZPTemp2
 		rts
 
 removeBounce
-		lda #2
 		plp
 		bcs _bottom
 		jsr removeAInESBHead
@@ -1938,31 +1987,27 @@ _l		lda MovingPlatform.numSprites,x
 _next	inx
 		cpx # kSpriteLevelDataTypesStart
 		bne _l
+		plp
 		dec $d020
 		rts
 _foundOne
-		lda MovingPlatform.numSprites,x
-		tay
 		plp
 		bcs _bottom
 		jsr removeAInESBHead
 		jmp _done
 _bottom	jsr removeAInESBTail
 _done
-		lda MovingPlatform.sprIndex,x
-		sta entitySpriteBufferPointer
 		lda #0
 		sta MovingPlatform.numSprites,x
 		sta MovingPlatform.mapTableY,x
 		sta MovingPlatform.sprIndex,x
-		dey ; must drop below
 RemoveSpritesRestoreYExit		
-		lda #$ff
-		ldx entitySpriteBufferPointer
-		sta kEntSpriteBuffer.entYPtr,x
-		jsr advanceESBPointer
-		dey
-		bpl RemoveSpritesRestoreYExit
+;		lda #$ff
+;		ldx entitySpriteBufferPointer
+;		sta kEntSpriteBuffer.entYPtr,x
+;		jsr advanceESBPointer
+;		dey
+;		bpl RemoveSpritesRestoreYExit
 		ldy ZPTemp2
 		rts
 		
@@ -1986,18 +2031,22 @@ _foundOne
 		lda PlayerData.onMovingPlatform
 		cmp ZPTemp
 		bne _notOnThisOne
-		inc mplex.xpos
-		inc mplex.xpos+1
+		inc playerX
 _notOnThisOne		
 		ldy entitySpriteBufferPointer	
-		lda kEntSpriteBuffer.entXPtr,y 
+		lda entitySpriteSet.x1,y 
 		clc
 		adc #1
-		sta kEntSpriteBuffer.entXPtr,y
-		jsr advanceESBPointer
-		dec NormalTemp1
-		bpl _notOnThisOne
-		lda kEntSpriteBuffer.entXPtr,y 
+		sta entitySpriteSet.x1,y
+		lda entitySpriteSet.x2,y 
+		clc
+		adc #1
+		sta entitySpriteSet.x2,y
+		lda entitySpriteSet.x3,y 
+		clc
+		adc #1
+		sta entitySpriteSet.x3,y
+		lda entitySpriteSet.x3,y 
 		ldx #0 ; fix me
 		cmp MovingPlatformMaxXForLenght,x
 		bcs _flip
@@ -2011,20 +2060,25 @@ _flip	ldx ZPTemp
 _back	lda PlayerData.onMovingPlatform
 		cmp ZPTemp
 		bne _notOnThisOneEither
-		dec mplex.xpos
-		dec mplex.xpos+1
+		dec playerX
 _notOnThisOneEither
 		ldy entitySpriteBufferPointer	
-		lda kEntSpriteBuffer.entXPtr,y 
-		cmp #25
-		bcc _flip
+		lda entitySpriteSet.x1,y 
 		sec
 		sbc #1
-		sta kEntSpriteBuffer.entXPtr,y
-		jsr advanceESBPointer
-		dec NormalTemp1
-		bpl _notOnThisOneEither
-		bmi _next
+		sta entitySpriteSet.x1,y
+		lda entitySpriteSet.x2,y 
+		sec
+		sbc #1
+		sta entitySpriteSet.x2,y
+		lda entitySpriteSet.x3,y 
+		sec
+		sbc #1
+		sta entitySpriteSet.x3,y
+		lda entitySpriteSet.x1,y 
+		cmp #25
+		bcc _flip
+		jmp _next
 
 		
 updateEntsY		
@@ -2033,10 +2087,10 @@ _loop	lda entitySpriteBufferPointer
 		cmp entitySpriteBufferHead 
 		beq _exit
 		tax
-		lda kEntSpriteBuffer.entYPtr,x
+		lda entitySpriteSet.y,x
 		clc
 		adc ScrollDelta
-		sta kEntSpriteBuffer.entYPtr,x
+		sta entitySpriteSet.y,x
 		jsr advanceESBPointer
 		jmp _loop
 _exit	rts 
@@ -2068,48 +2122,44 @@ initEntitySpriteBuffer
 	rts
 	
 allocAInESBHead
+	lda #1
 	clc
 	adc entitySpriteBufferHead
 	cmp # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
 	bcc _noOver
-	sec
-	sbc # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
+	lda # kEntSpriteBuffer.startOffset
 _noOver
 	sta entitySpriteBufferHead
 	rts
 
 allocAInESBTail
-	sta NormalTemp4
 	lda entitySpriteBufferTail
 	sec
-	sbc NormalTemp4
+	sbc #1
 	bpl _noOver
-	clc
-	adc # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
+	lda # kEntSpriteBuffer.endOffset - 1
 _noOver
 	sta entitySpriteBufferTail
 	rts	
 		
 removeAInESBTail
+	lda #1
 	clc
 	adc entitySpriteBufferTail
 	cmp # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
 	bcc _noOver
-	sec
-	sbc # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
+	lda # kEntSpriteBuffer.startOffset
 _noOver
 	sta entitySpriteBufferTail
 	rts
 	
 removeAInESBHead
-	sta NormalTemp1
 	lda entitySpriteBufferHead
 	sec
-	sbc NormalTemp1
+	sbc #1
 	cmp # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
 	bcc _noUnder
-	clc
-	adc # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
+	lda # kEntSpriteBuffer.endOffset
 _noUnder
 	sta entitySpriteBufferHead
 	rts
@@ -2125,7 +2175,7 @@ advanceESBPointer
 	adc #1
 	cmp # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
 	bcc _noOver
-	lda #0
+	lda # kEntSpriteBuffer.startOffset
 _noOver
 	sta entitySpriteBufferPointer
 	rts
@@ -2564,6 +2614,7 @@ _joyRight
 		stx joyRight
 		jmp _checkFire		
 				
+.comment
 setStatusScreenSprites				
 	ldy # statusSpritesDefs.kNum-1		
 _loop		
@@ -2578,7 +2629,7 @@ _loop
 	dey	
 	bpl _loop	
 	rts	
-	
+.endc	
 plotHiScore	
 	lda #6	; start digit
 	ldx #11	; always draw digit
@@ -2655,7 +2706,7 @@ updatePlayerFlash
 	bne _exit
 	lda PlayerData.spriteFlashChargePump+1
 	sec
-	sbc #40
+	sbc #200
 	sta PlayerData.spriteFlashChargePump+1
 	lda PlayerData.spriteFlashChargePump
 	sbc #0
@@ -2667,7 +2718,7 @@ _skip
 	
 	ldx PlayerData.spriteFlashIndex 
 	lda PlayerChargeColourTable,x
-	sta mplex.sprc
+	sta playerColourMulti
 	inx
 	cpx # playerChargeColourCount
 	bne _notrest
@@ -2680,9 +2731,9 @@ _exit
 	ldx #0
 _skip2
 	lda PlayerAnimFrameOutlines,x
-	sta mplex.sprp+1
+	sta playerPtrMono
 	lda PlayerAnimFrameBackground,x
-	sta mplex.sprp
+	sta playerPtrMulti
 	rts
 	
 PlayerAnimFrameOutlines
@@ -2700,7 +2751,7 @@ updatePlayerDoubleJumpFlash
 	sta TickDowns.playerDoubleJumpFlash
 	ldx PlayerData.spriteFlashDoubleJumpIndex
 	lda PlayerDoubleJumpColourTable,x
-	sta mplex.sprc+1
+	sta playerColourMono
 	inx
 	cpx # PlayerDoubleJumpFlashCount
 	bne _notReset
@@ -3032,7 +3083,9 @@ kTimerMasks .block
    Secs   = %11000000
 .bend
 incAndUpdateSecs
+.if DISABLE_RASTER_DEBUG = 0
 	dec $d020
+.endif
 	lda TimerSecondsCount
 	clc
 	adc #1
@@ -3063,7 +3116,9 @@ incAndUpdateSecs
 	iny
 	cpx #15
 	bcc -
+.if DISABLE_RASTER_DEBUG = 0
 	inc $d020
+.endif
 	rts
 	
 incAndUpdateTens	
@@ -3277,9 +3332,9 @@ setirq
 	sta $d011		 ;raster irq to 1st half of screen.
 	lda # kRaster.bottomRaster
 	sta $d012		 ;irq to happen at line #$fb
-	lda #<irq0
+	lda #< BottomRaster  ; #<irq0
 	sta $fffe		 ;hardware irq vector low byte
-	lda #>irq0
+	lda #> BottomRaster  ; #>irq0
 	sta $ffff		 ;hardware irq vector high byte
 	lda #$1f
 	sta $dc0d		 ;turn off all types of cia irq/nmi.
@@ -3304,7 +3359,8 @@ setirq
 	sta $fffb
 	cli			 ;clear interrupt disable
 	rts			 ;return from subroutine
-
+	
+.comment
 irq0
 	pha		;use stack instead of zp to prevent bugs.
 	txa
@@ -3756,20 +3812,49 @@ eirq	pla
 		pla
 		tax
 		pla
+.endc
 justRTI	rti
 
-updateStatusSpriteRaster
+
+updateSpriteRaster
 		pha			;save registers
 		txa
 		pha
 		tya
 		pha
 		inc $d019		;acknowledge irq
-		lda CurrStatusRasterSpriteIndex
-		tax
+		lda nextRasterType
+		and # kNextRasterType.status
+		beq +
+		jsr DoStatusRaster
++		lda nextRasterType
+		and # kNextRasterType.ent
+		beq +
+		jsr setVICFromCurrMultiSlot
++		jsr DetermineNextRasterLineAndType
+eirq2	pla
 		tay
+		pla
+		tax
+		pla
+		rti
+		
+DoStatusRaster		
+;dec $D020	
+		ldy CurrStatusRasterSpriteIndex
+		ldx CurrStatusRasterIndex
+		cpx #3
+		bne +
+		lda #1
+		sta $D02C
+		bne _doneColour
++		cpx #2
+		bne _doneColour
+		lda #13
+		sta $D02C
+_doneColour
 		lda	statusSpritesDefs.numSprToDo,x
-		sta ZPTemp
+		sta rasterTemp1
 		tax
 -		lda statusSpritesDefs.def,y
 		sta kVectors.spr5ID,x
@@ -3782,29 +3867,13 @@ updateStatusSpriteRaster
 		lda statusSpritesDefs.y,y
 		sta $D00B,x
 		inc CurrStatusRasterSpriteIndex
-		ldx CurrStatusRasterSpriteIndex
-		dec ZPTemp
-		lda ZPTemp
+		ldy CurrStatusRasterSpriteIndex
+		dec rasterTemp1
+		ldx rasterTemp1
 		bpl -
 		inc CurrStatusRasterIndex
-		ldx CurrStatusRasterIndex
-		cpx #3
-		beq _done
-		lda statusSpritesDefs.rasterPos,x	
-		sta $D012	
-_eirq	pla
-		tay
-		pla
-		tax
-		pla
-		rti
-_done	lda kRaster.bottomRaster
-		sta $D012
-		lda # <BottomRaster
-		sta $fffe
-		lda # >BottomRaster
-		sta $ffff
-		jmp _eirq
+;inc $D020
+		rts
 		
 BottomRaster
 		pha			;save registers
@@ -3829,17 +3898,208 @@ BottomRaster
 		sta $D00D
 		lda statusSpritesDefs.y+2
 		sta $D00F
+		lda statusSpritesDefs.def
+		sta kVectors.spr5ID
+		lda statusSpritesDefs.def+1
+		sta kVectors.spr6ID
+		lda statusSpritesDefs.def+2
+		sta kVectors.spr7ID 
+		lda #%11100011
+		sta $D015
+		lda #%00000010
+		sta $D01C
+		lda #%11100000
+		sta $D010
+		lda #1
+		sta $D02C
+		sta $D02D
+		sta $D02E
+		lda playerX
+		sta $D000
+		sta $D002
+		lda playerY
+		sta $D001
+		sta $D003
+		lda playerPtrMono
+		sta kVectors.spr0ID
+		lda playerPtrMulti
+		sta kVectors.spr1ID
+		lda playerColourMono
+		sta $D027
+		lda playerColourMulti
+		sta $D028
+		; check and build Entity multiplexor
+BottomRasterBuildEntity
+		lda entitySpriteBufferHead
+		cmp entitySpriteBufferTail
+		bne +
+		jmp _noEntities
++		lda entitySpriteBufferPointer
+		sta rasterEntityPointerCache
+		jsr resetESBPointer
+		ldx #0
+-		ldy entitySpriteBufferPointer
+		lda entitySpriteSet.y,y		
+		sta rasterSpriteSet.y,x		
+		sec	
+		sbc #8	
+		sta rasterSplitYPosEnt,x	
+		lda entitySpriteSet.x1,y		 		
+		sta rasterSpriteSet.x1,x		
+		lda entitySpriteSet.x2,y		
+		sta rasterSpriteSet.x2,x		
+		lda entitySpriteSet.x3,y		
+		sta rasterSpriteSet.x3,x		
+		lda entitySpriteSet.col1,y	
+		sta rasterSpriteSet.col1,x	
+		lda entitySpriteSet.col2,y	
+		sta rasterSpriteSet.col2,x	
+		lda entitySpriteSet.col3,y	
+		sta rasterSpriteSet.col3,x	
+		lda entitySpriteSet.multi,y	
+		sta rasterSpriteSet.multi,x	
+		lda entitySpriteSet.ptr1,y	
+		sta rasterSpriteSet.ptr1,x	
+		lda entitySpriteSet.ptr2,y	
+		sta rasterSpriteSet.ptr2,x	
+		lda entitySpriteSet.ptr3,y	
+		sta rasterSpriteSet.ptr3,x	
+		lda entitySpriteSet.enable,y
+		sta rasterSpriteSet.enable,x
+		inx
+		jsr advanceESBPointer
+		lda entitySpriteBufferPointer
+		cmp entitySpriteBufferHead
+		bne -
+		stx numRasters
+		dex
+		stx currEntRasterIndex
+		lda rasterEntityPointerCache
+		sta entitySpriteBufferPointer
+		jsr setVICFromCurrMultiSlot
+		jmp _exit
+_noEntities
+		lda #0
+		sta numRasters		
+		lda #$FF		
+		sta currEntRasterIndex		 
+_exit		
+		lda # <updateSpriteRaster
+		sta $FFFE
+		lda # >updateSpriteRaster
+		sta $FFFF
+		jsr DetermineNextRasterLineAndType
+		inc lsbtod
+		jmp eirq2
 		
-		
+setVICFromCurrMultiSlot
+;	inc $D020
+;	inc $D020
+	ldx currEntRasterIndex
+	lda rasterSpriteSet.y,x		
+	sta $D005
+	sta $D007
+	sta $D009
+	lda rasterSpriteSet.x1,x		
+	sta $D004		
+	lda rasterSpriteSet.x2,x		
+	sta $D006	
+	lda rasterSpriteSet.x3,x		
+	sta $D008		
+	lda rasterSpriteSet.col1,x	
+	sta $D029
+	lda rasterSpriteSet.col2,x	
+	sta $D02A	
+	lda rasterSpriteSet.col3,x	
+	sta $D02B	
+	lda $D01C	
+	and #%00000010
+	ora rasterSpriteSet.multi,x	
+	sta $D01C
+	lda rasterSpriteSet.ptr1,x	
+	sta kVectors.spr2ID	
+	lda rasterSpriteSet.ptr2,x	
+	sta kVectors.spr3ID	
+	lda rasterSpriteSet.ptr3,x	
+	sta kVectors.spr4ID	
+	lda $D015	
+	and #%11100011	
+	ora rasterSpriteSet.enable,x
+	sta $D015
+	dec currEntRasterIndex
+;	dec $D020
+;	dec $D020
+	rts
+	
+DetermineNextRasterLineAndType
+	ldx CurrStatusRasterIndex
+	cpx #4
+	beq _noMoreStatus
+	lda statusSpritesDefs.rasterPos,x	
+	bne +	
+_noMoreStatus		
+	lda #$FF		
++	sta rasterTemp1		
+	ldx currEntRasterIndex					
+	bmi _noMoreEntRasters	
+	;cpx numRasters		
+	;beq _noMoreEntRasters		
+	lda rasterSplitYPosEnt,x		
+	bne +		
+_noMoreEntRasters
+	lda #$FF		
++	sta rasterTemp2	
+	sec 	
+	sbc rasterTemp1	
+	cmp #256-5	
+	bcs _both	
+	cmp #6	
+	bcc _both	
+	lda rasterTemp2	
+	cmp rasterTemp1		
+	;beq _both		
+	bcc _ent	
+	lda # kNextRasterType.status	
+	bne _exit
+_ent	
+	lda rasterTemp2
+	sta rasterTemp1
+	lda # kNextRasterType.ent		
+	bne _exit	
+_both	
+	lda rasterTemp1	
+	cmp rasterTemp2	
+	bcc +	
+	lda rasterTemp2	
+	sta rasterTemp1	
++	lda # kNextRasterType.both		
+_exit		
+	sta nextRasterType	
+	lda rasterTemp1
+	cmp #kRaster.bottomRaster - 8
+	bcs doneUSSR
+	sta $D012
+	rts			
+doneUSSR	
+	lda #kRaster.bottomRaster
+	sta $D012
+	lda # <BottomRaster
+	sta $fffe
+	lda # >BottomRaster
+	sta $ffff	
+	rts	
+	
+EntEnableMaskLUT .byte 0,%00000100, %00001100, %00011100
+
 statusSpritesDefs .block		
 	kNum = 10
 	kColour = 1
 	;   | high score          |  score      |    stage    | Lives | timer
-x .byte 200+24+8,200+24,200+48,200+24,200+48,200+24,200+48,200+36 , 200+27, 200+51
+x .byte 24+8,24,48,24,48,24,48,36 , 27, 51
 y .byte 50,71,71, 50+54,50+54, 50+92,50+92, 50+130, 50+168,50+168
 def .byte kSprBase+38,kSprBase+36,kSprBase+37, kSprBase+34,kSprBase+35, kSprBase+39,kSprBase+40, kSprBase+41, kSprBase+44,kSprBase+45 
 numSprToDo .byte 2,1,2,1 ;-1 of value		
-rasterPos .byte 100,138,210
+rasterPos .byte 00,100,138,210
 .bend		
 
 ; first is a dummy 
