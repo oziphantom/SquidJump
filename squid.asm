@@ -40,13 +40,20 @@ kTimers .block
 
 kPlayerParams .block
 	jumpStartDelta = 255-1
-	jumpDeltaAccum = 19
-	jumpDeltaAccumFloat = 10
+	jumpDeltaAccum = 80
+	jumpDeltaAccumFloat = 28
 	maxFallSpeed = 4
-	maxRiseSpeed = $fb
-	maxRiseSpeedLo = $C0
+	maxRiseSpeed = $f6
+	maxRiseSpeedLo = $20
 	chargeRate = 50
 	normalColour = 15
+	Xdelta = 30
+	XRestoreDelta = 5
+	maxXDelta = 1
+	maxXDeltaNegative = 255 - (maxXDelta-1)
+	startFlashTimer = 8
+	minFlashTimer = 4
+	chargeAnimFrameTimer = 4
 .bend
 
 kScoreSprites .block
@@ -173,7 +180,9 @@ rasterTemp3 .byte ?
 rasterTemp4 .byte ?
 currEntRasterIndex .byte ?
 nextRasterType .byte ? 
+playerXLo .byte ? 
 playerX .byte ?
+playerYLo .byte ?
 playerY .byte ?
 playerPtrMulti .byte ?
 playerPtrMono .byte ?
@@ -213,10 +222,10 @@ high .byte ?,?,?,?,?,?
 currLevel .byte ?
 .ends
 
-sLevelData .struct
-playerX .byte ?
-playerY .byte ?
-.ends
+;sLevelData .struct
+;playerX .byte ?
+;playerY .byte ?
+;.ends
 
 sTimerTickDowns .struct
 playerAnim 	.byte ?
@@ -247,6 +256,8 @@ onMovingPlatform .byte ?
 onConvayerLeft .byte ?
 onConvayerRight .byte ?
 spriteFlashDoubleJumpIndex .byte ?
+XDelta .word ?
+animeFrameBit .byte ?
 .ends
 
 sCSTCCParams .struct	
@@ -304,7 +315,7 @@ GameData .dstruct sGameData
 .if WARN 
 .warn "al .LevelData ", *
 .endif
-LevelData .dstruct sLevelData
+;LevelData .dstruct sLevelData
 .if WARN 
 .warn "al .PlayerData ", *
 .endif
@@ -506,7 +517,7 @@ start
 		; set up ECBM colours
 		lda #0
 		sta $d021
-		lda #6
+		lda #$E
 		sta $d022
 		lda #3
 		sta $d023
@@ -532,38 +543,6 @@ start
 		sta $300
 		sta $301
 		sta $302
-;		
-;		cli
-;		-		lda $300	
-;		bne +	
-;		lda $301		
-;		beq -	
-;		dec $301
-;		dec $d020
-;		jsr clearCRAMForCurrentScreen
-;		jsr moveMapTrackeDownOneRow
-;		jsr plotCRAMForCurrentScreen		
-;		dec $d020		
-;		jsr moveCurrMapPtrDownOneRow
-;		jsr copyBigMapToLittleMap
-;		inc $d020
-;		inc $d020
-;		jmp -	
-;+
-;		dec $300
-;		dec $d020
-;		jsr clearCRAMForCurrentScreen
-;		jsr moveMapTrackeUpOneRow
-;		jsr plotCRAMForCurrentScreen		
-;		dec $d020		
-;		jsr moveCurrMapPtrUpOneRow
-;		jsr copyBigMapToLittleMap
-;		inc $d020
-;		inc $d020
-;		jmp -
-
-		
-		
 		cli
 ;
 ;		main loop
@@ -623,54 +602,24 @@ _notDead
 		jsr checkCollision
 		lda checkSpriteToCharData.xDeltaCheck
 		beq _addY
-		lda playerX
-		clc
-		adc checkSpriteToCharData.xDeltaCheck
-		sta ZPTemp
-		; xdelta +ve if this is +ve but original was -ve we have gone over
-		lda checkSpriteToCharData.xDeltaCheck
-		bmi _subbedX
-		lda playerX
-		bpl _loadX 
-		; so last pos in negative >80
-		lda ZPTemp
-		bmi _storeX
-		; new pos is positive 0-80
-	;	lda #0			; enable MSB
-	;	sta mplex.xmsb
-		jmp _storeX
-_subbedX
-		; xdelta -ve if this is -ve but original was +ve we have gone over
-		lda playerX
-		bmi _loadX
-		; last post is positive >80
-		lda ZPTemp
-		bpl _storeX		
-	;	lda #1			; clear MSB
-	;	sta mplex.xmsb
-		lda #255
-		jmp _storeX
-_loadX
-		lda ZPTemp
-_storeX		
-	;	ldx mplex.xmsb
-	;	beq _XClipInMSB
-	;	cmp #24
-	;	bcs _storeX2
-	;	lda #24
-	;	bne _storeX2
-;_XClipInMSB	
-;		cmp #8	
-;		bcc _storeX2	
-;		lda #8		
-_storeX2
-		sta playerX
+	;	lda playerXLo
+	;	clc
+	;	adc checkSpriteToCharData.xDeltaCheck
+	;	sta playerXLo
+	;	lda playerX
+	;	adc #0
+	;	sta playerX
 _addY		
-+		lda playerY
++		lda checkSpriteToCharData.yDeltaCheck	
+		beq +	
+		lda playerYLo
 		clc
-		adc checkSpriteToCharData.yDeltaCheck
+		adc PlayerData.yDeltaAccum
+		sta playerYLo
+		lda playerY
+		adc PlayerData.yDeltaAccum+1
 		sta playerY
-		jsr updatePlayerAnim
++		jsr updatePlayerAnim
 		lda #0
 		sta ScrollDelta
 		lda playerY
@@ -720,9 +669,18 @@ _noScroll
 		lda currMapPtr
 		cmp # <(kVectors.mapBottom-(40*24))
 		bcc Fall ; above that lo as well fall
+
+_makeSureYScrollIs0
+		lda yScroll
+		beq _updateWater
+		dec yScroll
 		
 _updateWater
 		jsr updateWater		
+WriteD011
+		lda yScroll
+		ora #%01010000
+		sta $d011	
 PostLoop
 		jsr updatePlayerDoubleJumpFlash
 		jsr updateMovingPlatform
@@ -741,12 +699,9 @@ PostLoop
 _noYMove
 		jmp -		
 				
-WriteD011
-		lda yScroll
-		ora #%01010000
-		sta $d011
+
 		jmp PostLoop		
-		jsr updateWater		
+	;	jsr updateWater		
 				
 Fall
 		lda # kDeadZone.bottom
@@ -843,11 +798,12 @@ ResetLevel
 checkCollision
 	lda checkSpriteToCharData.yDeltaCheck
 	bmi CCexit	
-	lda playerY
-	cmp #222
-	bcc CCcheckChars
-	pha
-	pha ; to fix up for the dropthrough
+	bpl CCcheckChars	
+	;;lda playerY
+	;;cmp #222
+	;;bcc CCcheckChars
+	;;pha
+	;;pha ; to fix up for the dropthrough
 CCong
 	pla
 	pla ; pull jsr to checkCharsInternal off the stack
@@ -908,7 +864,7 @@ checkMovingPlatforms
 	clc
 	adc #11
 	sta ZPTemp
-	ldx # kNumMovingPlatforms
+	ldx # kNumMovingPlatforms-1
 _l	lda MovingPlatform.numSprites,x
 	bne _foundOne
 _next	
@@ -945,7 +901,7 @@ _foundOne
 	jmp checkOtherEnts ; could be fall thorugh eventually
 	
 checkOtherEnts
-	ldx # kNumOtherEnts
+	ldx # kNumOtherEnts-1
 _l	lda OtherEnts.mapTableY,x
 	bne _foundOne
 _next	
@@ -1029,7 +985,7 @@ CollFuncBouce
 	sta PlayerData.yDeltaAccum
 	sta PlayerData.onGround
 	sta PlayerData.isFalling
-	lda #$FA
+	lda # kPlayerParams.maxRiseSpeed
 	sta PlayerDAta.yDeltaAccum+1
 	lda #1
 	sta PlayerData.hasJumped
@@ -1084,21 +1040,84 @@ _notConRight
 ; Check Left and Right
 		lda joyLeft
 		beq _cr
-		lda #$ff
-		sta checkSpriteToCharData.xDeltaCheck
-		sta PlayerData.lastXDelta
-		jmp _noChangeLR
+;		lda #$ff
+;		sta checkSpriteToCharData.xDeltaCheck
+;		sta PlayerData.lastXDelta
+		lda PlayerData.XDelta
+		sec
+		sbc # kPlayerParams.Xdelta
+		sta PlayerData.XDelta
+		lda PlayerData.XDelta+1
+		sbc #0
+		sta PlayerData.XDelta+1
+		bpl _updateX
+		cmp # kPlayerParams.maxXDeltaNegative
+		bcs _updateX
+		lda # kPlayerParams.maxXDeltaNegative				
+		sta PlayerData.XDelta+1				
+		lda #0				
+		sta PlayerData.XDelta	
+		jmp _updateX
 _cr		lda joyRight
 		beq _noChangeLR
-		lda #1		
-		sta checkSpriteToCharData.xDeltaCheck
-		sta PlayerData.lastXDelta
+;		lda #1		
+;		sta checkSpriteToCharData.xDeltaCheck
+;		sta PlayerData.lastXDelta
+		lda PlayerData.XDelta
+		clc
+		adc # kPlayerParams.Xdelta
+		sta PlayerData.XDelta
+		lda PlayerData.XDelta+1
+		adc #0
+		sta PlayerData.XDelta+1
+		bmi _updateX
+		cmp # kPlayerParams.maxXDelta
+		bcc _updateX
+		lda # kPlayerParams.maxXDelta				
+		sta PlayerData.XDelta+1				
+		lda #0				
+		sta PlayerData.XDelta				
+		jmp _updateX
 ; Check Up and Down		
 ;_cu		lda joyLeft
 ;		ora joyRight
 ;		bne _noChangeLR
 		; joy l r = not movement
 _noChangeLR		
+		lda PlayerData.XDelta+1	
+		bne _dampen1 
+		lda PlayerData.XDelta
+		bne _dampen2
+		jmp _updateX
+_dampen2				
+		lda PlayerData.XDelta+1
+_dampen1		
+		bpl _subRestore
+		lda PlayerData.XDelta
+		clc
+		adc # kPlayerParams.XRestoreDelta
+		sta PlayerData.XDelta
+		lda PlayerData.XDelta+1
+		adc #0
+		sta PlayerData.XDelta+1
+		jmp _updateX
+_subRestore
+		lda PlayerData.XDelta
+		sec
+		sbc # kPlayerParams.XRestoreDelta
+		sta PlayerData.XDelta
+		lda PlayerData.XDelta+1
+		sbc #0
+		sta PlayerData.XDelta+1		
+_updateX
+		lda PlayerData.XDelta
+		clc
+		adc playerXLo
+		sta playerXLo
+		lda PlayerData.XDelta+1		
+		sta checkSpriteToCharData.xDeltaCheck
+		adc playerX
+		sta playerX
 
 ; calculate nu Jumps < 2
 		ldx #0
@@ -1173,7 +1192,7 @@ _checkLo
 		sta PlayerData.jumpChargePump
 +		lda PlayerData.fireWasDown
 		bne _justUpdate
-		lda #8
+		lda # kPlayerParams.startFlashTimer
 		sta PlayerData.spriteFlashChargePump
 _justUpdate
 		jsr updatePlayerFlash
@@ -1188,7 +1207,7 @@ noChargePump
 		lda #0
 		sta PlayerData.jumpChargePump
 		sta PlayerData.jumpChargePump + 1
-		lda #8
+		lda # kPlayerParams.startFlashTimer
 		sta PlayerData.spriteFlashChargePump
 		
 endChargePump
@@ -1231,7 +1250,7 @@ downOne
 		bne _justUpdate
 		lda #1
 		sta PlayerData.fireWasDown
-		lda #8
+		lda # kPlayerParams.startFlashTimer
 		sta PlayerData.spriteFlashChargePump
 _justUpdate
 		jsr updatePlayerFlash
@@ -1348,6 +1367,8 @@ setPlayerOnGroundStatus
 		sta PlayerData.hasJumped
 		sta PlayerData.yDeltaAccum + 1
 		sta checkSpriteToCharData.yDeltaCheck
+		sta PlayerData.XDelta
+		sta PlayerData.XDelta + 1
 		rts
 		
 ;changePlayerDir
@@ -1388,7 +1409,7 @@ removeMovingPlatAndOtherEnts
 -	sta MovingPlatform.numSprites,x
 	dex
 	bpl -
-	ldx # kNumOtherEnts
+	ldx # kNumOtherEnts-1
 -	sta OtherEnts.mapTableY,x
 	dex
 	bpl -
@@ -1447,7 +1468,7 @@ setPlayerToDefaultColours
 					
 emptyCRAM
 		ldx #00
-		lda #6
+		lda #$06
 -		sta $d800,x
 		sta $d900,x
 		sta $da00,x
@@ -1483,7 +1504,7 @@ _loop
 		
 		
 clearCRAMForCurrentScreen		
-		lda #6		
+		lda #$06		
 		sta CRAMPlotColour		
 		sta CRAMBorderPlotColour	
 		bne plotCRAMinternal		
@@ -2104,7 +2125,6 @@ MovingPlatformXDeltaTable
 .byte 00,24,08,3 ; 7		
 .byte 00,24,16,3 ; 8		
 .byte 00,24,24,3 ; 9		
-
 PlatformSizeToSpritesCountLUT	
 .byte 1,1,1,2,2,2,3,3,3	
 
@@ -2157,9 +2177,9 @@ removeAInESBHead
 	lda entitySpriteBufferHead
 	sec
 	sbc #1
-	cmp # kEntSpriteBuffer.endOffset-kEntSpriteBuffer.startOffset
-	bcc _noUnder
-	lda # kEntSpriteBuffer.endOffset
+	cmp # kEntSpriteBuffer.startOffset
+	bpl _noUnder
+	lda # kEntSpriteBuffer.endOffset-1
 _noUnder
 	sta entitySpriteBufferHead
 	rts
@@ -2449,8 +2469,24 @@ loadMapVectors
 clearLargeMapArea
 		sei
 		ldx #0
-		lda #65
+		lda #$1e
+		sta ZPTemp
 _loop	
+		lda ZPTemp
+        beq _doEor
+        asl
+        beq _noEor ;if the input was $80, skip the EOR
+        bcc _noEor
+_doEor   eor #$1d
+_noEor   sta ZPTemp
+		and #15
+		cmp #4
+		bcs _zero
+		clc
+		adc #$42
+		bne +
+_zero	lda #$41
++
 .for ptr = $6000, ptr < $c000, ptr = ptr + $100
 		sta ptr,x
 .next
@@ -2703,43 +2739,69 @@ PlayerDoubleJumpFlashCount = * -PlayerDoubleJumpColourTable
  				
 updatePlayerFlash
 	lda TickDowns.playerFlash
-	bne _exit
-	lda PlayerData.spriteFlashChargePump+1
-	sec
-	sbc #200
-	sta PlayerData.spriteFlashChargePump+1
+	bne _spriteUpdate
 	lda PlayerData.spriteFlashChargePump
-	sbc #0
+	bpl +
+	lda # kPlayerParams.minFlashTimer
 	sta PlayerData.spriteFlashChargePump
-	bpl _skip
++	sta TickDowns.playerFlash
+	inc PlayerData.spriteFlashIndex 
+	lda PlayerData.spriteFlashIndex 
+	cmp # playerChargeColourCount
+	bne _noColourChange
+	lda PlayerData.spriteFlashChargePump
+	cmp # kPlayerParams.minFlashTimer
+	bcc _flashTimerMin
+	sec
+	sbc #1
+	sta PlayerData.spriteFlashChargePump
+_flashTimerMin	
 	lda #0
-_skip
-	sta TickDowns.playerFlash
-	
-	ldx PlayerData.spriteFlashIndex 
+	sta PlayerData.spriteFlashIndex
+_noColourChange	
+	ldx PlayerData.spriteFlashIndex
 	lda PlayerChargeColourTable,x
 	sta playerColourMulti
-	inx
-	cpx # playerChargeColourCount
-	bne _notrest
-	ldx #0
-_notrest	
-	stx PlayerData.spriteFlashIndex
-_exit	
-	ldx PlayerData.spriteFlashChargePump
-	bpl _skip2
-	ldx #0
-_skip2
+; do the sprite updates		
+_spriteUpdate	
+	ldx #3		
+_loop
+	lda PlayerData.jumpChargePump+1		
+	cmp playerAnimLevelsHi,x
+	bcc _done
+	bne _next
+	lda PlayerData.jumpChargePump
+	cmp playerAnimLevelsLo,x
+	bcc _done
+_next
+	dex
+	bne _loop
+_done
+	txa
+	asl a
+	ora PlayerData.animeFrameBit
+	tax
 	lda PlayerAnimFrameOutlines,x
 	sta playerPtrMono
 	lda PlayerAnimFrameBackground,x
 	sta playerPtrMulti
+	lda TickDowns.playerAnim
+	bne _exit
+	lda # kPlayerParams.chargeAnimFrameTimer
+	sta TickDowns.playerAnim
+	lda PlayerData.animeFrameBit
+	eor #1
+	sta PlayerData.animeFrameBit
+_exit	
 	rts
+
+playerAnimLevelsLo .byte $00,$80,$00,$40	
+playerAnimLevelsHi .byte $FF,$FA,$F8,$F6	
 	
 PlayerAnimFrameOutlines
-	.byte kSprBase+13,kSprBase+11,kSprBase+9,kSprBase+7,kSprBase+5,kSprBase+3,kSprBase+1,kSprBase+1,kSprBase+1,kSprBase+1,kSprBase+1
+	.byte kSprBase+03,kSprBase+03,kSprBase+05,kSprBase+05,kSprBase+09,kSprBase+09,kSprBase+13,kSprBase+13
 PlayerAnimFrameBackground
-	.byte kSprBase+12,kSprBase+10,kSprBase+8,kSprBase+6,kSprBase+4,kSprBase+2,kSprBase+0,kSprBase+0,kSprBase+0,kSprBase+0,kSprBase+0
+	.byte kSprBase+02,kSprBase+02,kSprBase+04,kSprBase+06,kSprBase+08,kSprBase+10,kSprBase+12,kSprBase+12
 	
 updatePlayerDoubleJumpFlash
 	lda PlayerData.deltaToAddToJumped
@@ -3807,7 +3869,7 @@ done 	lda #<irq0
 		sta $ffff
 		lda # kRaster.bottomRaster
 		sta $d012
-eirq	pla
+neirq	pla
 		tay
 		pla
 		tax
