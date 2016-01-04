@@ -168,6 +168,7 @@ kGameState .block
 	death = 1
 	EOL = 2
 	title = 3
+	prepareLevel = 4
 .bend
 
 * = $02
@@ -367,6 +368,9 @@ CurrStatusRasterSpriteIndex .byte ? ; the sprite data index
 CurrStatusRasterIndex .byte ? ; the raster index
 GameState .byte ? 
 MinorState .byte ?
+LevelPrepareState .byte ?
+LevelPrepareToState .byte ?
+RANDSeed .byte ?
 
 .if * > $0400
 .warn  "variables over $400"
@@ -443,9 +447,12 @@ start
 		lda #1
 		sta $d024
 		
-		lda # kGameState.game
+		lda # kGameState.EOL
 		sta GameState
-		jsr ResetLevel
+		jsr setNMIEndOfLevel
+		
+		lda #$1e
+		sta RANDSeed
 		
 		; fake set up stuff
 		lda #$98
@@ -476,8 +483,10 @@ MainLoop
 +		cmp # kGameState.EOL
 		bne +
 		jmp EOLMainLoop
-+		
-		lda $400
++		cmp # kGameState.prepareLevel
+		bne +
+		jmp PrepareLevel
++		lda $400
 		beq _skipDebug
 		lda #159
 		sta playerY
@@ -651,6 +660,8 @@ DeathMainLoop
 	sta playerPtrMono
 	jsr setPlayerToDefaultColours
 	lda MinorState
+	beq _swtichModes
+	cmp #1
 	beq +
 	lda #0
 	sta MinorState
@@ -659,21 +670,60 @@ DeathMainLoop
 	jsr RemoveSpritesAndEnts
 	jsr ResetLevel
 +	jmp MainLoop
-
-EOLMainLoop
-	lda MinorState
-	beq DoPlot
-	cmp #1
-	beq skipNewLevel
-	jsr ResetLevel
-skipNewLevel		
-	jmp MainLoop
-DoPlot
-	jsr plotEndOfLevel
-	jsr RemoveSpritesAndEnts
+_swtichModes
+	lda #kGameState.death
+	sta LevelPrepareToState
+	lda #kGameState.prepareLevel
+	sta GameState
+	lda #0
+	sta LevelPrepareState
 	inc MinorState
 	jmp MainLoop
 	
+EOLMainLoop
+	lda MinorState
+	beq _DoPlot
+	cmp #1
+	beq _wait
+	jsr ResetLevel
+_wait
+	jmp MainLoop
+_DoPlot
+	jsr plotEndOfLevel
+	jsr RemoveSpritesAndEnts
+	inc MinorState
+	lda GameState
+	sta LevelPrepareToState
+	lda #kGameState.prepareLevel
+	sta GameState
+	lda #0
+	sta LevelPrepareState
+	jmp MainLoop
+	
+prepareLevel
+	lda LevelPrepareState
+	beq _start
+	cmp #1
+	beq _clear
+	; misc resets and set state back
+	ldx Level
+	jsr loadMapVectors
+	jsr convertMapDataToLargeMap
+	jsr initMapTracker
+	jsr resetCurrMapPtrToFirstScreen
+	lda LevelPrepareToState
+	sta GameState	
+	jmp MainLoop
+_start
+	jsr startLargeMapArea
+	inc LevelPrepareState
+	jmp MainLoop
+_clear
+	jsr clearLargeMapArea		
+	bcc _wait		
+	inc LevelPrepareState		
+_wait		
+	jmp MainLoop
 
 
 checkCharsInternal		
@@ -706,21 +756,23 @@ DEATH
 	rts			
 											
 ResetLevelNMI											
+	pha										
+	cld										
 	lda $DD0D										
 	inc MinorState										
+	pla										
 	rti										
 												
 ResetLevel
-		sei
+;		sei
+		cld
 		lda $DD0D ; ack any NMI
-		jsr clearLargeMapArea ;trahes x so needs to happen before loadvectors
-		ldx Level
-		jsr loadMapVectors
-		jsr convertMapDataToLargeMap
-		jsr resetCurrMapPtrToFirstScreen
+;		jsr clearLargeMapArea ;trahes x so needs to happen before loadvectors
+		
+		
 		jsr copyBigMapToLittleMap
 		jsr emptyCRAM
-		jsr initMapTracker
+		
 		jsr plotCRAMForCurrentScreen
 		jsr resetPlayerData 
 		jsr setPlayerToSpawnPoint		
@@ -730,7 +782,7 @@ ResetLevel
 		sta GameState
 		sta yScroll
 		sta ScrollDelta
-		cli		
+;		cli	
 		rts		
 		
 RemoveSpritesAndEnts
@@ -946,6 +998,7 @@ AdvanceLevel
 	inc Level
 	lda #0
 	sta playerSpriteEnable
+	sta MinorState
 	jmp setNMIEndOfLevel
 		
 platformWidthTable	
@@ -2370,11 +2423,19 @@ _store
 		sta currMapPtr+1
 		rts
 		
+
+startLargeMapArea
+		lda #$60
+		sta pointer1+1
+		lda #$00
+		sta pointer1
+		rts
+		
 clearLargeMapArea
-		sei
-		ldx #0
-		lda #$1e
+		ldy #0
+		lda RANDSeed
 		sta ZPTemp
+		inc RANDSeed
 _loop	
 		lda ZPTemp
         beq _doEor
@@ -2391,15 +2452,21 @@ _noEor   sta ZPTemp
 		bne +
 _zero	lda #$41
 +
-.for ptr = $6000, ptr < $c000, ptr = ptr + $100
-		sta ptr,x
-.next
-		inx
+;.for ptr = $6000, ptr < $c000, ptr = ptr + $100
+		sta (pointer1),y
+;.next
+		iny
 		beq _exit
 		jmp _loop
 _exit
-		cli
-		rts
+		lda pointer1+1		
+		clc		
+		adc #1		
+		sta pointer1+1	
+		cmp #$C0		
+		bne +		
+		sec				
++		rts
 		
 		
 convertMapDataToLargeMap
@@ -2985,7 +3052,7 @@ _repeatLoop2
 	lda NormalTemp1
 	clc
 	adc #16
-	cmp #20*8
+	cmp #20*4 ;8
 	beq _exit
 	sta NormalTemp1
 	sec
@@ -3352,6 +3419,7 @@ updateSpriteRaster
 		pha
 		tya
 		pha
+		cld
 		inc $d019		;acknowledge irq
 		lda nextRasterType
 		and # kNextRasterType.status
@@ -3411,6 +3479,7 @@ BottomRaster
 		pha
 		tya
 		pha
+		cld
 		inc $d019		;acknowledge irq
 		lda #3
 		sta CurrStatusRasterSpriteIndex
@@ -3648,6 +3717,7 @@ plotEndOfLevel
 	ldy #12
 	jsr pltP1P2toScreen
 	jsr plotScore
+	cld
 	rts
 		
 StringLUT 	.byte 00,01,03,02,03
@@ -3676,6 +3746,7 @@ plotEndMsg
 	sbc #1
 	sta ZPTemp3
 	bpl -
+	cld
 	rts
 
 plotEndBox
